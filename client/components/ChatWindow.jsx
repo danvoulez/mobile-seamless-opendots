@@ -5,13 +5,8 @@ import MessageItem from './MessageItem';
 import ApprovalCard from './ApprovalCard';
 import ModelPicker from './ModelPicker';
 import MascotAvatar from './MascotAvatar';
-import { FiPlus, FiMic, FiMicOff, FiMonitor, FiX, FiImage } from 'react-icons/fi';
-import {
-  sendMessage,
-  subscribeToChatStream,
-  uploadImage,
-  respondApproval,
-} from '../lib/api';
+import { FiPlus, FiMic, FiMicOff, FiMonitor, FiX } from 'react-icons/fi';
+import { uploadImage } from '../lib/api';
 
 function formatHeaderDate(msgs) {
   const firstWithDate = msgs?.find((m) => m.created_at);
@@ -35,18 +30,58 @@ function formatHeaderDate(msgs) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-export default function ChatWindow({ bot, models, messages, setMessages, onUpdateBotModel, onToggleComputer, defaultModel }) {
+function formatMsgTime(createdAt) {
+  const d = createdAt ? new Date(createdAt) : null;
+  if (!d || isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
+function ToolEvent({ event }) {
+  return (
+    <div className="my-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-[11px] text-slate-300">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-mono text-cyan-300">{event.tool || 'workspace'}</span>
+        <span className={event.type === 'tool.completed' ? 'text-emerald-400' : 'text-amber-400'}>
+          {event.type.replace('tool.', '')}
+        </span>
+      </div>
+      {event.error && <p className="mt-1 text-rose-300">{event.error}</p>}
+      {event.result && (
+        <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-slate-400">
+          {JSON.stringify(event.result, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+export default function ChatWindow({
+  bot,
+  botIndex = 0,
+  thread,
+  models,
+  messages,
+  turn,
+  loading,
+  onSend,
+  onRespondApproval,
+  onUpdateBotModel,
+  onToggleComputer,
+  defaultModel,
+}) {
   const [inputPrompt, setInputPrompt] = useState('');
-  const [isStreaming, setIsStreaming] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [activeModel, setActiveModel] = useState(bot?.model || defaultModel || 'gpt-5-mini');
   const [selectedImage, setSelectedImage] = useState(null);
-  const [pendingApprovals, setPendingApprovals] = useState([]);
-  const [toolEvents, setToolEvents] = useState([]);
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
   const botTitle = bot?.name || 'Open Dots Assistant';
+  const avatarType = bot?.isError ? 'warning' : botIndex % 2 === 1 ? 'pink' : 'blue';
+  const isStreaming = turn?.status === 'running';
+  const needsApproval = isStreaming && turn.approvals?.some((approval) => approval.status === 'pending');
 
   // Initial welcome greeting fallback for the active bot
   const defaultInitialMessages = [
@@ -74,7 +109,11 @@ export default function ChatWindow({ bot, models, messages, setMessages, onUpdat
 
   useEffect(() => {
     scrollToBottom();
-  }, [activeMessages, isStreaming]);
+  }, [activeMessages, turn]);
+
+  useEffect(() => {
+    setSendError('');
+  }, [thread?.id]);
 
   const handleModelChange = (newModel) => {
     setActiveModel(newModel);
@@ -84,7 +123,7 @@ export default function ChatWindow({ bot, models, messages, setMessages, onUpdat
   };
 
   const handleApprovalResponse = async (requestId, action) => {
-    await respondApproval(requestId, action);
+    await onRespondApproval(requestId, action);
   };
 
   const handleImageSelect = async (e) => {
@@ -111,91 +150,82 @@ export default function ChatWindow({ bot, models, messages, setMessages, onUpdat
 
   const handleSendMessage = async (e) => {
     e?.preventDefault();
-    if ((!inputPrompt.trim() && !selectedImage) || isStreaming) return;
+    if ((!inputPrompt.trim() && !selectedImage) || isStreaming || isSending) return;
 
     const userText = inputPrompt;
     const currentSelected = selectedImage;
-    
+
     setInputPrompt('');
     setSelectedImage(null);
+    setSendError('');
+    setIsSending(true);
 
     let finalImageUrl = currentSelected?.uploadedUrl || null;
 
-    // Ensure image upload finishes before dispatching to the inference backend
-    if (currentSelected && !finalImageUrl) {
-      try {
+    try {
+      // Ensure image upload finishes before dispatching to the inference backend
+      if (currentSelected && !finalImageUrl) {
         const res = await uploadImage(currentSelected.file);
         finalImageUrl = res.url;
-      } catch (err) {
-        console.error('Image upload failed on send:', err);
       }
-    }
-
-    const userMsgObj = {
-      id: `temp-user-${Date.now()}`,
-      sender: 'user',
-      text: userText,
-      image_url: currentSelected?.previewUrl || finalImageUrl,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, userMsgObj]);
-
-    try {
-      if (bot?.id) {
-        await sendMessage(bot.id, bot.id, userText, activeModel, finalImageUrl);
-        setIsStreaming(true);
-        let streamingMsgId = null;
-
-
-        subscribeToChatStream(
-          bot.id,
-          activeModel,
-          (event) => {
-            if (event.type === 'turn.started') {
-              streamingMsgId = event.botMsgId;
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: streamingMsgId,
-                  sender: 'bot',
-                  text: '',
-                  created_at: new Date().toISOString(),
-                },
-              ]);
-            } else if (event.type === 'request.opened') {
-              setPendingApprovals((prev) => [
-                ...prev.filter((approval) => approval.requestId !== event.requestId),
-                event,
-              ]);
-            } else if (['tool.started', 'tool.completed', 'tool.failed', 'tool.denied', 'tool.expired'].includes(event.type)) {
-              setToolEvents((prev) => [
-                ...prev.slice(-4),
-                { ...event, id: `${event.type}-${Date.now()}` },
-              ]);
-              if (event.type === 'tool.expired') {
-                setPendingApprovals((prev) => prev.filter((approval) => approval.requestId !== event.requestId));
-              }
-            } else if (event.type === 'content.delta') {
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === streamingMsgId
-                    ? { ...msg, text: msg.text + event.delta }
-                    : msg
-                )
-              );
-            } else if (event.type === 'turn.completed') {
-              setIsStreaming(false);
-            }
-          },
-          () => setIsStreaming(false)
-        );
-      }
+      await onSend({
+        text: userText,
+        imageUrl: finalImageUrl,
+        previewUrl: currentSelected?.previewUrl,
+        model: activeModel,
+      });
     } catch (err) {
       console.error('Send message error:', err);
-      setIsStreaming(false);
+      setInputPrompt(userText);
+      setSendError(err.status === 409 ? 'Wait for the current reply to finish.' : err.message || 'Could not send the message.');
+    } finally {
+      setIsSending(false);
     }
   };
 
+  // Messages, "Continued on iPhone" markers, and the current turn's approval
+  // and tool cards, placed just before the reply they belong to.
+  const renderThread = () => {
+    const turnCards = turn ? [
+      ...(turn.approvals || []).map((approval) => (
+        <ApprovalCard key={`approval-${approval.requestId}`} approval={approval} onRespond={handleApprovalResponse} />
+      )),
+      ...(turn.tools || []).map((event, index) => (
+        <ToolEvent key={`tool-${index}-${event.type}-${event.requestId || ''}`} event={event} />
+      )),
+    ] : [];
+    const items = [];
+    let lastOrigin = null;
+    let cardsPlaced = false;
+
+    for (const msg of activeMessages) {
+      if (msg.sender === 'user' && msg.origin) {
+        if (lastOrigin && msg.origin !== lastOrigin) {
+          items.push(
+            <div key={`handoff-${msg.id}`} className="flex items-center gap-3 my-4 text-[11px] font-medium text-zinc-500">
+              <span className="flex-1 h-px bg-[#1f1f23]" />
+              <span>Continued on {msg.origin} · {formatMsgTime(msg.created_at)}</span>
+              <span className="flex-1 h-px bg-[#1f1f23]" />
+            </div>
+          );
+        }
+        lastOrigin = msg.origin;
+      }
+      if (turn && msg.id === turn.botMsgId) {
+        items.push(...turnCards);
+        cardsPlaced = true;
+      }
+      items.push(<MessageItem key={msg.client_id || msg.id} message={msg} />);
+    }
+
+    if (turn && !cardsPlaced) {
+      items.push(...turnCards);
+      if (isStreaming && turn.text) {
+        items.push(<MessageItem key={turn.botMsgId} message={{ id: turn.botMsgId, sender: 'bot', text: turn.text }} />);
+      }
+    }
+    return items;
+  };
 
   const handleVoiceToggle = () => {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
@@ -230,9 +260,16 @@ export default function ChatWindow({ bot, models, messages, setMessages, onUpdat
       {/* Top Header Bar */}
       <header className="px-6 py-3.5 flex items-center justify-between z-20 bg-[#09090b]/80 backdrop-blur-md border-b border-[#18181c]">
         {/* Left Side: Bot Indicator */}
-        <div className="flex items-center gap-2.5">
-          <MascotAvatar type={bot?.isError ? 'warning' : 'blue'} size="sm" />
-          <h2 className="font-bold text-sm text-zinc-100 tracking-wide">{botTitle}</h2>
+        <div className="flex items-center gap-2.5 min-w-0">
+          <MascotAvatar type={avatarType} size="sm" />
+          <div className="min-w-0">
+            <h2 className="font-bold text-sm text-zinc-100 tracking-wide truncate">{thread?.title || botTitle}</h2>
+            {(thread?.title || isStreaming) && (
+              <p className={`text-[11px] truncate ${needsApproval ? 'text-amber-400' : isStreaming ? 'text-blue-400' : 'text-zinc-500'}`}>
+                {needsApproval ? 'Needs your approval' : isStreaming ? 'Replying…' : botTitle}
+              </p>
+            )}
+          </div>
         </div>
 
 
@@ -265,42 +302,12 @@ export default function ChatWindow({ bot, models, messages, setMessages, onUpdat
             </span>
           </div>
 
-          {pendingApprovals.map((approval) => (
-            <ApprovalCard
-              key={approval.requestId}
-              approval={approval}
-              onRespond={handleApprovalResponse}
-            />
-          ))}
-
-          {toolEvents.map((event) => (
-            <div
-              key={event.id}
-              className="my-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-[11px] text-slate-300"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <span className="font-mono text-cyan-300">{event.tool || 'workspace'}</span>
-                <span className={event.type === 'tool.completed' ? 'text-emerald-400' : 'text-amber-400'}>
-                  {event.type.replace('tool.', '')}
-                </span>
-              </div>
-              {event.error && <p className="mt-1 text-rose-300">{event.error}</p>}
-              {event.result && (
-                <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-slate-400">
-                  {JSON.stringify(event.result, null, 2)}
-                </pre>
-              )}
-            </div>
-          ))}
-
           {/* Message Items List */}
-          {activeMessages.map((msg) => (
-            <MessageItem key={msg.id} message={msg} />
-          ))}
+          {loading && messages.length === 0 ? null : renderThread()}
 
-          {isStreaming && (
+          {isStreaming && !turn.text && !needsApproval && (
             <div className="flex justify-start items-center gap-3 my-3 animate-fade-in">
-              <MascotAvatar type={bot?.isError ? 'warning' : 'blue'} size="sm" />
+              <MascotAvatar type={avatarType} size="sm" />
               <div className="bg-[#18181b] border border-[#27272a] px-4 py-3 rounded-2xl flex items-center gap-1.5 shadow-sm">
                 <span className="w-2 h-2 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '-0.32s' }} />
                 <span className="w-2 h-2 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '-0.16s' }} />
@@ -359,6 +366,10 @@ export default function ChatWindow({ bot, models, messages, setMessages, onUpdat
               <FiX className="text-sm" />
             </button>
           </div>
+        )}
+
+        {sendError && (
+          <p role="alert" className="w-full max-w-2xl mb-2 px-1 text-[11px] text-rose-400">{sendError}</p>
         )}
 
         <form

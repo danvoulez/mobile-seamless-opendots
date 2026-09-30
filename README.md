@@ -16,6 +16,7 @@ Open Dots is independently built and is not affiliated with or endorsed by OpenA
 
 ## What it does
 
+- Continue any conversation on your iPhone. Everything runs on your Mac; the phone opens the same chats, follows replies as they stream, starts new chats, and answers approvals. No cloud service sits in between.
 - Create assistant personas with separate instructions, model IDs, and visual identities.
 - Stream chat responses, persist conversations locally, render Markdown, attach images, and dictate messages where the browser supports speech input.
 - Connect to models through the included inference adapter and choose from its configured model catalog.
@@ -64,6 +65,55 @@ Open `http://127.0.0.1:3000` and sign in with the Open Dots owner token. On firs
 
 Browser sessions use distinct HttpOnly cookies with server-enforced expiry. Sign out revokes the current session, and restarting the API invalidates all browser sessions. Direct API clients can continue to send the owner token as a Bearer credential. Loopback requests, including container gateway and reverse-proxy traffic, must authenticate too.
 
+## Continue on iPhone
+
+Open Dots runs on your Mac. Your iPhone picks up the same conversations: open a chat and keep talking, or start a new one. Every reply, tool, and approval still runs on the Mac, and the phone connects straight to it over your network. There is no cloud relay and no separate phone account.
+
+### Start Open Dots on your Mac
+
+You need Python 3.10+ and Node.js (`brew install python node`). From the project folder, run:
+
+```bash
+./scripts/start-mac.sh
+```
+
+The first run creates the Python environment, installs and builds the web client, then opens `http://localhost:3000`. Sign in with the owner token (`cat ~/.open-dots/.auth-token`) and add your model provider under **Settings → Model provider**.
+
+The script makes the API listen on your local network so the phone can reach it (the web client itself stays on the Mac), and it keeps the Mac from idle-sleeping while Open Dots runs. The display can still sleep; set `OPEN_DOTS_ALLOW_SLEEP=1` to allow system sleep too. If macOS asks whether Python may accept incoming connections, choose **Allow**.
+
+To start Open Dots whenever you log in, run `./scripts/start-mac.sh --install-login-item`. To undo it, run `--remove-login-item`.
+
+### Link your iPhone
+
+1. On the Mac, choose **Continue on iPhone** at the bottom of the sidebar.
+2. Scan the code with the iPhone camera while both are on the same Wi-Fi. Safari opens Open Dots.
+3. Tap **Share → Add to Home Screen**, then open Open Dots from the Home Screen. You can also choose **Use in Safari instead**.
+
+The code works once and expires after 10 minutes. You can also type the address shown on the Mac into Safari and enter the code by hand.
+
+### What carries over
+
+- **Conversations:** both devices show the same chats, newest first, and the phone offers a **Continue** card for the conversation you were just in. Messages record which device sent them, so a thread shows where it was *Continued on iPhone* or on the Mac.
+- **Replies:** a reply runs on the Mac, not in the browser. Locking the phone or closing the tab doesn't stop it. Open the chat on either device, even mid-reply, and it catches up.
+- **Approvals:** a request for approval appears on every open device and can be answered on any of them.
+- **When the Mac is away:** if the Mac sleeps or leaves the network while Open Dots is open on the phone, it keeps your recent chats on screen and reconnects by itself. The app itself is served by the Mac, so opening it from the Home Screen while the Mac is unreachable only works over HTTPS (see Tailscale below), where the phone keeps a copy of the app. Over plain local-network HTTP, iOS shows a connection error until the Mac is back.
+
+### Linked devices
+
+Linking gives the iPhone its own long-lived credential, stored only as a hash on the Mac. A linked phone can read and continue conversations, start new ones, attach images, and answer approvals. It cannot change settings or keys, manage assistants, use the computer or connector panels, delete conversations, or link other devices. Unlink a phone from the **Continue on iPhone** panel on the Mac, or from the phone's own settings sheet; it stops working immediately.
+
+### Network and encryption
+
+On your own Wi-Fi the phone reaches the Mac over plain HTTP at its Bonjour name (`your-mac.local:8000`), like other local-network apps, so anyone on the same network could read that traffic. Use a network you trust.
+
+To reach your Mac from anywhere with encryption, put both devices on [Tailscale](https://tailscale.com/kb/1242/tailscale-serve) and let it serve Open Dots over HTTPS. For example, run `tailscale serve --bg 8000`, then start Open Dots with the resulting address:
+
+```bash
+HOST=127.0.0.1 PUBLIC_URL=https://your-mac.your-tailnet.ts.net ./scripts/start-mac.sh
+```
+
+With `HOST=127.0.0.1` the API is only reachable through Tailscale. Your conversations still live on the Mac; Tailscale only connects the two devices.
+
 ## Model provider
 
 The default inference adapter sends a prediction request to `{MODEL_API_BASE_URL}/{model_id}` and uploads images to `{MODEL_API_BASE_URL}/upload_file`. Configure it with a service that implements this request and response contract and supports the model IDs you select.
@@ -88,7 +138,10 @@ Set `model_ids` to the service's supported chat model IDs and `default_model` to
 | `APP_AUTH_TOKEN` | generated in `DATA_DIR` | Server-side owner credential for sign-in and direct API access |
 | `WORKSPACE_ROOT` | project root | Directory boundary for approved workspace actions |
 | `COMPUTER_PROVIDER` | `fake` | Computer provider: `fake`, `docker`, or `remote` |
-| `HOST` / `PORT` | `127.0.0.1` / `8000` | API bind address |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | API bind address (`scripts/start-mac.sh` uses `0.0.0.0` so a linked iPhone can connect) |
+| `PUBLIC_URL` | detected | Address linked phones use to reach this computer, e.g. a Tailscale HTTPS name; defaults to the Bonjour name or LAN address |
+| `PAIRING_CODE_TTL_SECONDS` | `600` | How long a Continue on iPhone code stays valid |
+| `DEVICE_SESSION_MAX_AGE` | 400 days | Lifetime of a linked device's cookie; unlinking revokes it at once |
 
 For non-loopback access, set `APP_AUTH_TOKEN` only on the server, use HTTPS with `AUTH_COOKIE_SECURE=1`, and set a narrow `CORS_ORIGINS` list. Configure the public API address with `NEXT_PUBLIC_API_URL`, and sign in through the form; do not embed credentials in `NEXT_PUBLIC_*` variables. Keep the UI and API on the same site so the browser can send the session cookie. The built-in session store targets one API process; sessions are not shared between workers or instances.
 
@@ -119,8 +172,10 @@ For a remote computer service, configure `COMPUTER_PROVIDER=remote` and the `COM
 ## Architecture
 
 ```text
-Next.js client ── HTTP + SSE ── FastAPI API
-                                  ├── SQLite + encrypted settings
+Next.js client (Mac) ──┐
+                        ├── HTTP + live events (SSE) ── FastAPI API
+iPhone app (/m/) ──────┘                                 ├── conversations + background turns
+                                                          ├── SQLite + encrypted settings
                                   ├── configurable inference adapter
                                   ├── Composio connector adapter
                                   └── action gateway + approvals + audit
@@ -128,7 +183,9 @@ Next.js client ── HTTP + SSE ── FastAPI API
                                         └── fake / Docker / remote computer
 ```
 
-The main code areas are `client/` (Next.js UI), `server/app/routers/` (HTTP API), `server/app/services/` (providers, persistence, approvals, and tools), and `runtime/` (Docker computer driver).
+The main code areas are `client/` (Next.js UI), `mobile/` (the iPhone app, served by the API at `/m/` with no build step), `server/app/routers/` (HTTP API), `server/app/services/` (providers, persistence, background turns, live events, device linking, approvals, and tools), and `runtime/` (Docker computer driver).
+
+Run the tests with `python -m unittest discover -s tests` in `server/` and `npm test` in `mobile/`.
 
 ## Current limitations
 
@@ -137,7 +194,7 @@ The main code areas are `client/` (Next.js UI), `server/app/routers/` (HTTP API)
 - Inference supports the original prediction API and Responses-compatible services; Chat Completions and a generic provider plugin interface are not implemented.
 - The computer runtime is opt-in and is not a hardened security boundary for arbitrary web content.
 - Connector actions are intentionally narrow; arbitrary tool discovery and writes are not implemented.
-- There is no mobile or desktop client, durable memory service, or scheduled routine engine.
+- The iPhone app is a Home Screen web app served by your Mac, not an App Store app, so it has no push notifications; it catches up when you open it. There is no native desktop app, durable memory service, or scheduled routine engine.
 
 ## Contributing
 

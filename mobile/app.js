@@ -177,7 +177,7 @@ const state = {
   phase: 'boot', // boot | pair | app
   computer: cache.computer || 'your Mac',
   computerKind: 'Mac',
-  device: null,
+  device: cache.device || null,
   connection: 'connecting', // connecting | live | offline
   bots: cache.bots || [],
   threads: cache.threads || [],
@@ -192,6 +192,7 @@ const state = {
 function saveCache() {
   storage.set('od:cache', {
     computer: state.computer,
+    device: state.device,
     bots: state.bots,
     threads: state.threads.slice(0, 50),
   });
@@ -978,10 +979,15 @@ function openSheet(...content) {
   els.sheetLayer.replaceChildren(h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true' },
     h('div', { class: 'grabber' }), ...content));
   els.sheetLayer.classList.add('open');
+  els.list.inert = true; // modal: keep VoiceOver and taps on the sheet
+  els.chat.inert = true;
 }
 
 function closeSheet() {
-  els.sheetLayer?.classList.remove('open');
+  if (!els.sheetLayer) return;
+  els.sheetLayer.classList.remove('open');
+  els.list.inert = false;
+  els.chat.inert = false;
 }
 
 async function openNewChat() {
@@ -1014,7 +1020,7 @@ function openSettings() {
         h('div', null, h('h2', null, state.computer), h('p', { class: 'muted' }, `${connection} · ${location.host}`))),
       h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: closeSheet }, icon('x'))),
     h('p', { class: 'sheet-copy' },
-      `Your conversations live on ${state.computer}. This iPhone continues them directly — nothing goes through a cloud service. When your ${state.computerKind} sleeps or leaves the network, Open Dots waits for it.`),
+      `Your conversations are stored on ${state.computer}, and this iPhone connects to it directly — no cloud relay in between. When your ${state.computerKind} sleeps or leaves the network, Open Dots waits for it.`),
     linked ? h('p', { class: 'muted sheet-note' }, `Linked ${linked.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`) : null,
     state.device
       ? h('button', { class: 'btn-danger', type: 'button', onclick: unlinkThisPhone }, 'Unlink this iPhone')
@@ -1223,6 +1229,10 @@ function handleEvent(event) {
 // -------------------------------------------------------------------- boot
 
 async function boot() {
+  // A cached copy lets the app open while the computer is away (HTTPS only).
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register('/m/sw.js', { scope: '/m/' }).catch(() => {});
+  }
   syncViewport();
   window.visualViewport?.addEventListener('resize', syncViewport);
   window.visualViewport?.addEventListener('scroll', syncViewport);

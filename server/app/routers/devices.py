@@ -6,7 +6,7 @@ import segno
 
 from app.services.device_service import PairingError, device_service
 from app.services.event_bus import event_bus
-from app.services.host_info import base_urls, computer_name, listening_beyond_loopback
+from app.services.host_info import base_urls, computer_name, reachable_by_devices
 
 router = APIRouter(prefix="/api/v1/devices", tags=["devices"])
 
@@ -39,7 +39,7 @@ async def create_pairing(request: Request):
         "url": url,
         "qr": qr,
         "addresses": addresses,
-        "reachable": listening_beyond_loopback(),
+        "reachable": reachable_by_devices(),
         "computer_name": computer_name(),
     }
 

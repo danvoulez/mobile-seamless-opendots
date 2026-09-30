@@ -83,8 +83,9 @@ def lan_addresses() -> List[Dict[str, str]]:
     return [{"address": address, "kind": kind} for address, kind in found.items()]
 
 
-def listening_beyond_loopback() -> bool:
-    return settings.HOST not in LOOPBACK_HOSTS
+def reachable_by_devices() -> bool:
+    """False when phones have no way in: loopback only and no public address."""
+    return bool(settings.PUBLIC_URL) or settings.HOST not in LOOPBACK_HOSTS
 
 
 def base_urls() -> List[Dict[str, str]]:

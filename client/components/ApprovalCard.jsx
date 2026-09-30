@@ -4,9 +4,11 @@ import React, { useState } from 'react';
 import { FiShield, FiTerminal, FiCheck, FiX, FiAlertTriangle } from 'react-icons/fi';
 
 export default function ApprovalCard({ approval, onRespond }) {
-  const [status, setStatus] = useState('pending'); // pending, allowed, denied
+  const [localStatus, setLocalStatus] = useState('pending'); // pending, allowed, denied
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
+  // The request may be answered on another device; the server's status wins.
+  const status = { allow: 'allowed', deny: 'denied', expired: 'expired' }[approval.status] || localStatus;
 
   const handleAction = async (action) => {
     setIsSubmitting(true);
@@ -15,7 +17,7 @@ export default function ApprovalCard({ approval, onRespond }) {
       if (onRespond) {
         await onRespond(approval.requestId, action);
       }
-      setStatus(action === 'allow' ? 'allowed' : 'denied');
+      setLocalStatus(action === 'allow' ? 'allowed' : 'denied');
     } catch (err) {
       setError(err?.message || 'Could not submit this decision.');
     } finally {
@@ -78,7 +80,7 @@ export default function ApprovalCard({ approval, onRespond }) {
             }`}
           >
             {status === 'allowed' ? <FiCheck /> : <FiX />}
-            {status === 'allowed' ? 'Approved' : 'Denied'}
+            {status === 'allowed' ? 'Approved' : status === 'expired' ? 'Expired' : 'Denied'}
           </span>
         </div>
       )}

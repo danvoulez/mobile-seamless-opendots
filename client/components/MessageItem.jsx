@@ -13,12 +13,12 @@ function formatMsgTime(createdAt) {
 
 export default function MessageItem({ message }) {
   const isUser = message.sender === 'user';
-  const isError = message.isError || message.text?.toLowerCase().startsWith('error:');
+  const isError = message.isError || message.is_error || message.text?.toLowerCase().startsWith('error:');
   const formattedTime = formatMsgTime(message.created_at);
 
   if (isUser) {
     return (
-      <div className="flex justify-end my-1.5">
+      <div className={`flex justify-end my-1.5 ${message.pending ? 'opacity-70' : ''}`}>
         <div className="dark-bubble-user px-3.5 py-2 text-xs font-sans max-w-md shadow-md">
           {message.image_url && (
             <img

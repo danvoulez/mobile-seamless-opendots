@@ -366,3 +366,132 @@ export async function executeComputerAction(botId, requestId) {
   if (!res.ok) throw new Error(payload.detail || 'Computer action execution failed');
   return payload;
 }
+
+// ----- Conversations shared with linked devices ------------------------------
+
+async function readError(res, fallback) {
+  const payload = await res.json().catch(() => ({}));
+  const detail = Array.isArray(payload.detail)
+    ? payload.detail.map((item) => item.msg).join(' ')
+    : payload.detail;
+  const error = new Error(detail || fallback);
+  error.status = res.status;
+  return error;
+}
+
+export async function fetchThreads() {
+  try {
+    const res = await apiFetch(`${API_BASE_URL}/threads`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch (err) {
+    console.warn('Conversations API offline:', err);
+    return [];
+  }
+}
+
+export async function fetchThread(threadId) {
+  const res = await apiFetch(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}`);
+  if (!res.ok) throw await readError(res, 'Failed to load conversation');
+  return res.json();
+}
+
+export async function createThread(botId) {
+  const res = await apiFetch(`${API_BASE_URL}/threads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bot_id: botId }),
+  });
+  if (!res.ok) throw await readError(res, 'Failed to start a conversation');
+  return res.json();
+}
+
+export async function deleteThread(threadId) {
+  const res = await apiFetch(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}`, { method: 'DELETE' });
+  if (!res.ok) throw await readError(res, 'Failed to delete conversation');
+  return res.json();
+}
+
+export async function postThreadMessage(threadId, { text, imageUrl = null, model = null, clientId = null }) {
+  const res = await apiFetch(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, image_url: imageUrl, model, client_id: clientId }),
+  });
+  if (!res.ok) throw await readError(res, 'Failed to send message');
+  return res.json();
+}
+
+// One live stream for the whole workspace: messages, reply deltas, approvals
+// and conversation list changes from this computer and linked devices.
+export function subscribeToEvents(onEvent, onStatus) {
+  let source = null;
+  let retryTimer = null;
+  let retryDelay = 1000;
+  let closed = false;
+
+  const connect = () => {
+    if (closed) return;
+    ensureSession()
+      .then(() => {
+        if (closed) return;
+        source = new EventSource(`${API_BASE_URL}/events`, { withCredentials: true });
+        source.onmessage = (e) => {
+          try {
+            const event = JSON.parse(e.data);
+            if (event.type === 'hello') {
+              retryDelay = 1000;
+              onStatus?.('live');
+            }
+            onEvent(event);
+          } catch (err) {
+            console.warn('Failed to parse event payload:', err);
+          }
+        };
+        source.onerror = () => {
+          onStatus?.('reconnecting');
+          if (source.readyState !== EventSource.CLOSED) return; // the browser retries
+          source = null;
+          sessionPromise = null;
+          retryTimer = setTimeout(connect, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 15000);
+        };
+      })
+      .catch((error) => {
+        if (error instanceof AuthenticationError) {
+          sessionExpired();
+          return;
+        }
+        onStatus?.('reconnecting');
+        retryTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 15000);
+      });
+  };
+
+  connect();
+  return () => {
+    closed = true;
+    clearTimeout(retryTimer);
+    source?.close();
+  };
+}
+
+// ----- Continue on iPhone ----------------------------------------------------
+
+export async function createPairing() {
+  const res = await apiFetch(`${API_BASE_URL}/devices/pairing`, { method: 'POST' });
+  if (!res.ok) throw await readError(res, 'Could not create a linking code');
+  return res.json();
+}
+
+export async function fetchDevices() {
+  const res = await apiFetch(`${API_BASE_URL}/devices`);
+  if (!res.ok) throw await readError(res, 'Could not load linked devices');
+  return res.json();
+}
+
+export async function unlinkDevice(deviceId) {
+  const res = await apiFetch(`${API_BASE_URL}/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+  if (!res.ok) throw await readError(res, 'Could not unlink the device');
+  return res.json();
+}
