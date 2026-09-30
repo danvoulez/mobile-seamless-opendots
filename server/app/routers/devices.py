@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 import segno
 
-from app.services.device_service import PairingError, device_service
+from app.services.device_service import PairingError, client_address, device_service
 from app.services.event_bus import event_bus
 from app.services.host_info import base_urls, computer_name, device_noun, reachable_by_devices
 
@@ -47,9 +47,11 @@ async def create_pairing(request: Request):
 @router.post("/pair")
 async def pair_device(body: PairRequest, request: Request, response: Response):
     try:
-        device, token = device_service.redeem(body.code, request.headers.get("user-agent", ""))
+        device, token = device_service.redeem(
+            body.code, request.headers.get("user-agent", ""), client_address(request)
+        )
     except PairingError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     device_service.set_cookie(response, token, secure=request.url.scheme == "https")
     response.headers["Cache-Control"] = "no-store"
     event_bus.publish({"type": "device.linked", "device": device})

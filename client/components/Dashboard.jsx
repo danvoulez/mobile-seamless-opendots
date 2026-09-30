@@ -67,16 +67,32 @@ export default function Dashboard({ onLogout }) {
     setActiveTab('chat');
   }, []);
 
+  // Streaming events can ask for a reload many times a second; run one at a
+  // time, plus one more if something asked again meanwhile.
+  const loadingRef = useRef(null); // { threadId, again }
   const loadThread = useCallback(async (threadId) => {
+    if (loadingRef.current?.threadId === threadId) {
+      loadingRef.current.again = true;
+      return;
+    }
+    const load = { threadId, again: false };
+    loadingRef.current = load;
     try {
-      const detail = await fetchThread(threadId);
-      if (activeThreadRef.current !== threadId) return;
-      setChat((prev) => mergeSnapshot(prev, detail));
-      setThreads((prev) => upsertThread(prev, detail.thread));
-    } catch (err) {
-      if (activeThreadRef.current !== threadId) return;
-      console.error('Failed to load conversation:', err);
-      setChat((prev) => ({ ...prev, loading: false }));
+      do {
+        load.again = false;
+        try {
+          const detail = await fetchThread(threadId);
+          if (activeThreadRef.current !== threadId) return;
+          setChat((prev) => mergeSnapshot(prev, detail));
+          setThreads((prev) => upsertThread(prev, detail.thread));
+        } catch (err) {
+          if (activeThreadRef.current !== threadId) return;
+          console.error('Failed to load conversation:', err);
+          setChat((prev) => ({ ...prev, loading: false }));
+        }
+      } while (load.again && activeThreadRef.current === threadId);
+    } finally {
+      if (loadingRef.current === load) loadingRef.current = null;
     }
   }, []);
 

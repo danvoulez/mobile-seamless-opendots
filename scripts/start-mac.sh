@@ -45,7 +45,10 @@ install_login_item() {
     <string>--no-open</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>$PATH</string></dict>
+  <dict>
+    <key>PATH</key><string>$PATH</string>
+    <key>OPEN_DOTS_BACKGROUND</key><string>1</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$HOME/Library/Logs/OpenDots.log</string>
@@ -89,11 +92,16 @@ for arg in "$@"; do
   esac
 done
 
-# Already running (for example in the background): just open it.
 if api_ready && web_ready; then
-  echo "Open Dots is already running: http://localhost:$WEB_PORT"
-  open_web
-  exit 0
+  if [ "${OPEN_DOTS_BACKGROUND:-0}" = 1 ]; then
+    # Started in the background while a copy started by hand is running: take
+    # over when it stops, instead of exiting and being restarted every few seconds.
+    while api_ready; do sleep 15; done
+  else
+    echo "Open Dots is already running: http://localhost:$WEB_PORT"
+    open_web
+    exit 0
+  fi
 fi
 
 need() {
@@ -156,7 +164,8 @@ stop() {
   kill $PIDS 2>/dev/null || true
   wait 2>/dev/null || true
 }
-trap stop EXIT INT TERM
+trap stop EXIT
+trap 'stop; exit 0' INT TERM
 
 cd "$ROOT/server"
 # Listen on the local network so a linked iPhone can reach this Mac.
@@ -171,7 +180,8 @@ if [ "${OPEN_DOTS_ALLOW_SLEEP:-0}" != 1 ] && command -v caffeinate >/dev/null 2>
 fi
 
 (cd "$ROOT/client" && exec ./node_modules/.bin/next start -H 127.0.0.1 -p "$WEB_PORT") &
-PIDS="$PIDS $!"
+WEB_PID=$!
+PIDS="$PIDS $WEB_PID"
 
 for _ in $(seq 1 60); do
   api_ready && break
@@ -194,4 +204,11 @@ cat <<MESSAGE
 MESSAGE
 
 open_web
-wait "$SERVER_PID"
+
+# If either part stops, stop both, so a restart (by you, or by the background
+# login item) brings Open Dots back whole.
+while kill -0 "$SERVER_PID" 2>/dev/null && kill -0 "$WEB_PID" 2>/dev/null; do
+  sleep 2
+done
+echo "Part of Open Dots stopped; stopping the rest." >&2
+exit 1

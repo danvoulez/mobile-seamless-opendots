@@ -150,13 +150,27 @@ class PairingCodeTests(unittest.TestCase):
         with self.assertRaises(PairingError):
             self.devices.redeem(code)
 
-    def test_repeated_guesses_void_outstanding_codes(self):
+    def test_repeated_guesses_lock_out_only_the_guesser(self):
         code = self.devices.create_pairing_code()["code"]
         for _ in range(device_module.MAX_FAILED_ATTEMPTS):
             with self.assertRaises(PairingError):
-                self.devices.redeem("AAAA-AAAA")
-        with self.assertRaises(PairingError):
-            self.devices.redeem(code)
+                self.devices.redeem("AAAA-AAAA", address="203.0.113.9")
+        with self.assertRaises(device_module.TooManyAttempts):
+            self.devices.redeem(code, address="203.0.113.9")
+        # The owner's phone, elsewhere, can still use the code.
+        device, _ = self.devices.redeem(code, address="198.51.100.7")
+        self.assertTrue(device["id"])
+
+    def test_address_behind_cloudflare_tunnel(self):
+        from starlette.requests import Request
+
+        def request(client, headers=()):
+            return Request({"type": "http", "client": (client, 5000), "headers": list(headers)})
+
+        tunnel = request("127.0.0.1", [(b"cf-connecting-ip", b"203.0.113.9")])
+        self.assertEqual(device_module.client_address(tunnel), "203.0.113.9")
+        spoofed = request("192.168.1.20", [(b"cf-connecting-ip", b"1.2.3.4")])
+        self.assertEqual(device_module.client_address(spoofed), "192.168.1.20")
 
     def test_tokens_are_stored_hashed(self):
         code = self.devices.create_pairing_code()["code"]

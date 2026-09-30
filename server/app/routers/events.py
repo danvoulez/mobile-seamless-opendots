@@ -6,6 +6,7 @@ import json
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
 
+from app.services.auth_service import auth_service
 from app.services.event_bus import event_bus
 from app.services.host_info import computer_name
 
@@ -34,6 +35,8 @@ async def stream_events(request: Request):
                     # A visible heartbeat lets clients notice a connection that
                     # died silently (SSE comment pings never reach the page).
                     event = {"type": "heartbeat"}
+                    if not auth_service.authenticate_request(request):
+                        break  # signed out: stop streaming
                 yield {"event": "message", "data": json.dumps(event)}
         finally:
             event_bus.unsubscribe(subscription)

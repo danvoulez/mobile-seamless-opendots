@@ -26,7 +26,8 @@ from app.services.storage_service import local_now, storage_service
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I
 CODE_LENGTH = 8
 MAX_ACTIVE_CODES = 5
-MAX_FAILED_ATTEMPTS = 10
+MAX_FAILED_ATTEMPTS = 10  # wrong codes per address...
+FAILURE_WINDOW_SECONDS = 600  # ...within this window
 LAST_SEEN_WRITE_INTERVAL = 300
 DEVICE_COOKIE = "open_dots_device"
 DEVICE_TOKEN_PREFIX = "odd_"
@@ -41,7 +42,6 @@ _DEVICE_ROUTES = [
         ("GET", r"/api/v1/threads/[^/]+"),
         ("PATCH", r"/api/v1/threads/[^/]+"),
         ("POST", r"/api/v1/threads/[^/]+/messages"),
-        ("GET", r"/api/v1/events"),
         ("POST", r"/api/v1/approvals/respond"),
         ("POST", r"/api/v1/upload"),
         ("GET", r"/api/v1/devices/current"),
@@ -51,7 +51,11 @@ _DEVICE_ROUTES = [
 
 
 class PairingError(Exception):
-    pass
+    status = 400
+
+
+class TooManyAttempts(PairingError):
+    status = 429
 
 
 def device_may_access(method: str, path: str) -> bool:
@@ -80,6 +84,19 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def client_address(request: Request) -> str:
+    """The address a request really came from, also through Cloudflare Tunnel.
+
+    cloudflared connects from this computer, so behind it the peer is loopback
+    and Cloudflare's CF-Connecting-IP names the phone. Clients cannot set that
+    header through Cloudflare, and nobody else connects from loopback.
+    """
+    host = request.client.host if request.client else ""
+    if host in {"127.0.0.1", "::1"} and request.headers.get("cf-connecting-ip"):
+        return request.headers["cf-connecting-ip"]
+    return host or "unknown"
+
+
 def client_label(request: Request) -> str:
     """Where a request came from, as shown next to messages ("iPhone", "Mac")."""
     client = getattr(request.state, "client", None) or {}
@@ -91,7 +108,7 @@ class DeviceService:
         self.database = database
         self.owner_id = owner_id
         self._codes: Dict[str, float] = {}
-        self._failures = 0
+        self._failures: Dict[str, Tuple[int, float]] = {}  # address -> (count, window start)
         self._last_seen_writes: Dict[str, float] = {}
 
     # ----- one-time linking codes -------------------------------------------
@@ -103,17 +120,26 @@ class DeviceService:
             self._codes.pop(next(iter(self._codes)))
         code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
         self._codes[_digest(code)] = now + settings.PAIRING_CODE_TTL_SECONDS
-        self._failures = 0
         return {"code": format_code(code), "expires_in": settings.PAIRING_CODE_TTL_SECONDS}
 
-    def redeem(self, code: str, user_agent: str = "") -> Tuple[Dict[str, Any], str]:
+    def redeem(self, code: str, user_agent: str = "", address: str = "unknown") -> Tuple[Dict[str, Any], str]:
+        # Guessing is limited per address, so someone reaching the linking page
+        # (for example through a public tunnel) can't lock out the owner.
+        # 8 characters from 32 leave far too many codes to guess anyway.
+        now = monotonic()
+        count, since = self._failures.get(address, (0, now))
+        if now - since > FAILURE_WINDOW_SECONDS:
+            count, since = 0, now
+        if count >= MAX_FAILED_ATTEMPTS:
+            raise TooManyAttempts("Too many tries. Wait a few minutes, then try again.")
+
         normalized = normalize_code(code)
         expiry = self._codes.pop(_digest(normalized), None) if normalized else None
-        if expiry is None or expiry <= monotonic():
-            self._failures += 1
-            if self._failures >= MAX_FAILED_ATTEMPTS:
-                # Too many guesses: void every outstanding code.
-                self._codes.clear()
+        if expiry is None or expiry <= now:
+            self._failures = {
+                key: value for key, value in self._failures.items() if now - value[1] <= FAILURE_WINDOW_SECONDS
+            }
+            self._failures[address] = (count + 1, since)
             raise PairingError(f"That code expired or was already used. Get a new one on your {device_noun()}.")
 
         token = DEVICE_TOKEN_PREFIX + secrets.token_urlsafe(32)

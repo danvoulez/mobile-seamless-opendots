@@ -128,7 +128,12 @@ const storage = {
     try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
   },
   set(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+      return true;
+    } catch {
+      return false; // private mode, or full
+    }
   },
   remove(key) {
     try { localStorage.removeItem(key); } catch { /* private mode */ }
@@ -256,9 +261,25 @@ function schedule(...renders) {
 // new chats) wait, survive the app closing, and go out once it's back.
 let outbox = (storage.get('od:outbox') || []).map((item) => ({ ...item, status: 'waiting' }));
 let flushing = false;
+let flushAgain = false;
 
 function saveOutbox() {
-  storage.set('od:outbox', outbox.map(({ status, ...item }) => item));
+  const items = outbox.map(({ status, ...item }) => item);
+  if (storage.set('od:outbox', items)) return;
+  // Photos can outgrow the browser's storage (about 5 MB). Keep every
+  // message's text at least; the photos stay in memory while the app is open.
+  storage.set('od:outbox', items.map((item) => (
+    item.imageUrl?.startsWith('data:') ? { ...item, imageUrl: null, photoLost: true } : item
+  )));
+}
+
+// After a restart, say so if a waiting photo couldn't be kept.
+function reportLostPhotos() {
+  if (!outbox.some((item) => item.photoLost)) return;
+  outbox = outbox.filter((item) => item.text.trim() || !item.photoLost);
+  outbox.forEach((item) => delete item.photoLost);
+  saveOutbox();
+  toast(`A photo you added while your ${state.computerKind} was away couldn't be kept.`);
 }
 
 const isLocal = (threadId) => String(threadId || '').startsWith('local-');
@@ -312,56 +333,68 @@ function adoptThread(item, thread) {
 }
 
 async function flush() {
-  if (flushing || state.phase !== 'app' || !outbox.length) return;
+  if (state.phase !== 'app' || !outbox.length) return;
+  if (flushing) {
+    flushAgain = true; // for example, a reply ended while this pass was sending
+    return;
+  }
   flushing = true;
   try {
-    for (const item of [...outbox]) {
-      if (!outbox.includes(item)) continue;
-      if (item.threadId && threadBusy(item.threadId)) continue; // goes out when the reply ends
-      item.status = 'sending';
-      schedule(renderMessages);
-      try {
-        // Safe to repeat: the Mac recognizes the message by its client id.
-        const result = await rpc('messages.send', {
-          thread_id: item.threadId || null,
-          bot_id: item.threadId ? null : item.botId,
-          text: item.text,
-          image_url: item.imageUrl || null,
-          client_id: item.clientId,
-        });
-        if (!item.threadId) adoptThread(item, result.thread);
-        outbox = outbox.filter((other) => other !== item);
-        saveOutbox();
-        const chat = state.chat;
-        if (chat?.threadId === result.thread.id) {
-          upsertMessage(result.message);
-          if (result.duplicate) loadChat(chat.threadId);
-          else if (!chat.turn || chat.turn.botMsgId !== result.turn.botMsgId) chat.turn = result.turn;
-          schedule(renderChatHeader);
-        }
-      } catch (error) {
-        item.status = 'waiting';
-        if (error.status === 0) {
-          markTrouble();
-          break; // the Mac is away; everything waits for the reconnect
-        }
-        if (error.status === 409 || error.status === 401) continue;
-        // Refused for good (for example, the chat was deleted): give the text back.
-        outbox = outbox.filter((other) => other !== item);
-        saveOutbox();
-        if (state.chat && (state.chat.threadId === item.threadId || state.chat.threadId === item.localId) && !els.textarea.value) {
-          els.textarea.value = item.text;
-          state.composer.text = item.text;
-          autosize();
-        }
-        toast(error.message);
-      } finally {
-        schedule(renderMessages, renderList, renderChatHeader);
-      }
-    }
+    do {
+      flushAgain = false;
+    } while (await sendWaiting() && flushAgain && outbox.length);
   } finally {
     flushing = false;
   }
+}
+
+// One pass over the outbox. Returns false when the Mac can't be reached.
+async function sendWaiting() {
+  for (const item of [...outbox]) {
+    if (!outbox.includes(item)) continue;
+    if (item.threadId && threadBusy(item.threadId)) continue; // goes out when the reply ends
+    item.status = 'sending';
+    schedule(renderMessages);
+    try {
+      // Safe to repeat: the Mac recognizes the message by its client id.
+      const result = await rpc('messages.send', {
+        thread_id: item.threadId || null,
+        bot_id: item.threadId ? null : item.botId,
+        text: item.text,
+        image_url: item.imageUrl || null,
+        client_id: item.clientId,
+      });
+      if (!item.threadId) adoptThread(item, result.thread);
+      outbox = outbox.filter((other) => other !== item);
+      saveOutbox();
+      const chat = state.chat;
+      if (chat?.threadId === result.thread.id) {
+        upsertMessage(result.message);
+        if (result.duplicate) loadChat(chat.threadId);
+        else if (!chat.turn || chat.turn.botMsgId !== result.turn.botMsgId) chat.turn = result.turn;
+        schedule(renderChatHeader);
+      }
+    } catch (error) {
+      item.status = 'waiting';
+      if (error.status === 0) {
+        markTrouble();
+        return false; // the Mac is away; everything waits for the reconnect
+      }
+      if (error.status === 409 || error.status === 401) continue;
+      // Refused for good (for example, the chat was deleted): give the text back.
+      outbox = outbox.filter((other) => other !== item);
+      saveOutbox();
+      if (state.chat && (state.chat.threadId === item.threadId || state.chat.threadId === item.localId) && !els.textarea.value) {
+        els.textarea.value = item.text;
+        state.composer.text = item.text;
+        autosize();
+      }
+      toast(error.message);
+    } finally {
+      schedule(renderMessages, renderList, renderChatHeader);
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------- viewport
@@ -468,8 +501,19 @@ function renderPair({ mode = 'enter', code = '', error = '' } = {}) {
   ));
 }
 
+// The Home Screen app keeps its start address, linking code included, so
+// remember codes once tried and don't offer them again on later launches.
+function codeSpent(code) {
+  return (storage.get('od:spent-codes') || []).includes(code);
+}
+
+function spendCode(code) {
+  storage.set('od:spent-codes', [...(storage.get('od:spent-codes') || []), code].slice(-10));
+}
+
 async function link(code) {
   renderPair({ mode: 'linking' });
+  spendCode(code);
   try {
     const result = await api('/devices/pair', { method: 'POST', body: { code } });
     state.device = result.device;
@@ -562,6 +606,7 @@ function startApp() {
   buildApp();
   renderList();
   connect();
+  reportLostPhotos();
 }
 
 // -------------------------------------------------------------- chat list
@@ -687,7 +732,32 @@ function openDraft(botId) {
   setTimeout(() => els.textarea.focus(), 350);
 }
 
-async function loadChat(threadId) {
+// Streaming events can ask for a reload many times a second (for example when
+// a chat is opened mid-reply); only one runs at a time, plus one more if
+// something asked again meanwhile.
+let chatLoad = null; // { threadId, again, done }
+
+function loadChat(threadId) {
+  if (chatLoad?.threadId === threadId) {
+    chatLoad.again = true;
+    return chatLoad.done;
+  }
+  const load = { threadId, again: false };
+  chatLoad = load;
+  load.done = (async () => {
+    try {
+      do {
+        load.again = false;
+        await fetchChat(threadId);
+      } while (load.again && state.chat?.threadId === threadId);
+    } finally {
+      if (chatLoad === load) chatLoad = null;
+    }
+  })();
+  return load.done;
+}
+
+async function fetchChat(threadId) {
   try {
     const detail = await rpc('threads.get', { thread_id: threadId });
     if (state.chat?.threadId === threadId) applySnapshot(detail);
@@ -1463,12 +1533,13 @@ async function boot() {
   if (health?.computer_kind) state.computerKind = health.computer_kind === 'Mac' ? 'Mac' : health.computer_kind.toLowerCase();
   if (!cache.computer) state.computer = `your ${state.computerKind}`;
 
-  const code = normalizeCode(new URLSearchParams(location.search).get('pair'));
+  const linkCode = normalizeCode(new URLSearchParams(location.search).get('pair'));
+  const code = linkCode && !codeSpent(linkCode) ? linkCode : null;
   try {
     const current = await api('/devices/current');
     state.device = current.device;
     state.computer = current.computer_name || state.computer;
-    if (code) history.replaceState(null, '', '/m/');
+    if (linkCode) history.replaceState(null, '', '/m/');
     startApp();
     return;
   } catch (error) {

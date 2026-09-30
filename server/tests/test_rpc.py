@@ -177,6 +177,16 @@ class RpcSocketTests(unittest.TestCase):
                         ws.receive_json()
         self.assertEqual(closed.exception.code, rpc_router.CLOSE_NOT_LINKED)
 
+    def test_unlinked_device_is_cut_off_even_if_the_event_is_lost(self):
+        with self.connect() as ws:
+            ws.receive_json()
+            device_id = self.devices.list_devices()[0]["id"]
+            self.devices.revoke(device_id)  # no device.unlinked event reaches the socket
+            with self.assertRaises(WebSocketDisconnect) as closed:
+                self.call(ws, "messages.send", {"bot_id": "bot-open-dots-1", "text": "Still here?"})
+        self.assertEqual(closed.exception.code, rpc_router.CLOSE_NOT_LINKED)
+        self.assertFalse(any(m.get("text") == "Still here?" for m in self.storage.get_messages()))
+
     def test_tunnel_address_is_a_trusted_origin(self):
         headers = {"Authorization": f"Bearer {self.token}", "Origin": "https://dots.example.com", "Host": "dots.example.com"}
         with patch.object(rpc_router.origin_is_trusted.__globals__["settings"], "PUBLIC_URL", "https://dots.example.com"):

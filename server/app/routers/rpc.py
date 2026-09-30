@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import json
 import logging
+from time import monotonic
 from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -30,6 +31,7 @@ router = APIRouter(tags=["rpc"])
 
 PROTOCOL_VERSION = 1
 HEARTBEAT_SECONDS = 15
+RECHECK_SECONDS = 1  # how often an open connection re-checks its credentials
 CLOSE_NOT_LINKED = 4401  # the device must be linked (again) before connecting
 
 # JSON-RPC 2.0 errors, plus application errors that carry an HTTP-style status.
@@ -116,6 +118,27 @@ class RpcConnection:
         self.client = client
         self.send_lock = asyncio.Lock()
         self.open = True
+        self.checked_at = monotonic()
+
+    async def still_authorized(self, force: bool = False) -> bool:
+        """Close the connection once its device is unlinked or its session ends.
+
+        The unlink event alone isn't enough: it can be dropped when a client
+        falls behind. Re-checking also keeps the device's "last active" fresh.
+        """
+        if not self.open:
+            return False
+        if not force and monotonic() - self.checked_at < RECHECK_SECONDS:
+            return True
+        self.checked_at = monotonic()
+        if authenticate(self.websocket):
+            return True
+        self.open = False
+        try:
+            await self.websocket.close(code=CLOSE_NOT_LINKED, reason="This device was unlinked.")
+        except Exception:  # already closed
+            pass
+        return False
 
     async def send(self, payload: Any) -> None:
         if not self.open:
@@ -166,9 +189,8 @@ class RpcConnection:
                 # Keeps tunnels from closing an idle socket and lets clients
                 # notice a connection that died silently.
                 event = {"type": "heartbeat"}
-            if device_id and event.get("type") == "device.unlinked" and event.get("deviceId") == device_id:
-                self.open = False
-                await self.websocket.close(code=CLOSE_NOT_LINKED, reason="This device was unlinked.")
+            unlinked = device_id and event.get("type") == "device.unlinked" and event.get("deviceId") == device_id
+            if not await self.still_authorized(force=bool(unlinked)):
                 return
             await self.send(self._event(event))
 
@@ -199,6 +221,8 @@ class RpcConnection:
         return None if is_notification else response
 
     async def _call(self, request_id: Any, name: str, params: Any) -> Dict[str, Any]:
+        if not await self.still_authorized(force=True):
+            return _error(request_id, APP_ERRORS[403], "This device was unlinked.", 403)
         method = METHODS.get(name)
         if not method:
             return _error(request_id, METHOD_NOT_FOUND, f"Unknown method: {name}")
