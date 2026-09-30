@@ -217,7 +217,7 @@ Run the tests with `python -m unittest discover -s tests` in `server/` and `npm 
 - Inference supports the original prediction API and Responses-compatible services; Chat Completions and a generic provider plugin interface are not implemented.
 - The computer runtime is opt-in and is not a hardened security boundary for arbitrary web content.
 - Connector actions are intentionally narrow; arbitrary tool discovery and writes are not implemented.
-- The iPhone app is a Home Screen web app served by your Mac, not an App Store app, so it has no push notifications; it catches up when you open it. There is no native desktop app, durable memory service, or scheduled routine engine.
+- The iPhone app has no push notifications yet; it catches up when you open it. iOS allows notifications for Home Screen web apps only over HTTPS (for example through Cloudflare Tunnel), and they aren't implemented. There is no native desktop app, durable memory service, or scheduled routine engine.
 
 ## Contributing
 
