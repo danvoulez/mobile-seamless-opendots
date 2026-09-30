@@ -264,7 +264,7 @@ class StorageService:
                         "thread_id": "bot-open-dots-1",
                         "bot_id": "bot-open-dots-1",
                         "sender": "bot",
-                        "text": "Hello! I am **Open Dots Assistant**. Ask me a question or tell me what you would like to work on.",
+                        "text": "Hi, I'm **Open Dots Assistant**. What can I help with?",
                         "created_at": datetime.now().isoformat(),
                         "model": "gpt-5-mini",
                         "item_type": "assistant_text",

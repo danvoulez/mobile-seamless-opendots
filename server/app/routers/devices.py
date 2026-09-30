@@ -6,7 +6,7 @@ import segno
 
 from app.services.device_service import PairingError, device_service
 from app.services.event_bus import event_bus
-from app.services.host_info import base_urls, computer_name, reachable_by_devices
+from app.services.host_info import base_urls, computer_name, device_noun, reachable_by_devices
 
 router = APIRouter(prefix="/api/v1/devices", tags=["devices"])
 
@@ -21,7 +21,7 @@ def _client(request: Request) -> dict:
 
 def _require_owner(request: Request) -> None:
     if _client(request).get("kind") != "owner":
-        raise HTTPException(status_code=403, detail="Only the computer running Open Dots can manage devices.")
+        raise HTTPException(status_code=403, detail=f"Manage devices from Open Dots on your {device_noun()}.")
 
 
 @router.post("/pairing")

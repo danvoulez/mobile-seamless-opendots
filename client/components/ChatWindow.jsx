@@ -2,11 +2,12 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import MessageItem from './MessageItem';
-import ApprovalCard from './ApprovalCard';
+import ApprovalCard, { ActionStatus, ResultDetails } from './ApprovalCard';
 import ModelPicker from './ModelPicker';
 import MascotAvatar from './MascotAvatar';
 import { FiPlus, FiMic, FiMicOff, FiMonitor, FiX } from 'react-icons/fi';
 import { uploadImage } from '../lib/api';
+import { groupTurnActions, toolLabel } from '../lib/liveChat';
 
 function formatHeaderDate(msgs) {
   const firstWithDate = msgs?.find((m) => m.created_at);
@@ -38,19 +39,13 @@ function formatMsgTime(createdAt) {
 
 function ToolEvent({ event }) {
   return (
-    <div className="my-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-[11px] text-slate-300">
+    <div className="my-2 max-w-xl rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-[11px] text-slate-300">
       <div className="flex items-center justify-between gap-3">
-        <span className="font-mono text-cyan-300">{event.tool || 'workspace'}</span>
-        <span className={event.type === 'tool.completed' ? 'text-emerald-400' : 'text-amber-400'}>
-          {event.type.replace('tool.', '')}
-        </span>
+        <span className="font-semibold text-slate-200">{toolLabel(event.tool)}</span>
+        <ActionStatus event={event} />
       </div>
       {event.error && <p className="mt-1 text-rose-300">{event.error}</p>}
-      {event.result && (
-        <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-slate-400">
-          {JSON.stringify(event.result, null, 2)}
-        </pre>
-      )}
+      <ResultDetails result={event.result} />
     </div>
   );
 }
@@ -88,7 +83,7 @@ export default function ChatWindow({
     {
       id: 'msg-intro',
       sender: 'bot',
-      text: `Hello! I am **${botTitle}**. Ask me anything, or give me a task to work on!`,
+      text: `Hi, I'm **${botTitle}**. What can I help with?`,
       isError: false,
     },
   ];
@@ -177,7 +172,7 @@ export default function ChatWindow({
     } catch (err) {
       console.error('Send message error:', err);
       setInputPrompt(userText);
-      setSendError(err.status === 409 ? 'Wait for the current reply to finish.' : err.message || 'Could not send the message.');
+      setSendError(err.message || "Couldn't send. Try again.");
     } finally {
       setIsSending(false);
     }
@@ -186,14 +181,13 @@ export default function ChatWindow({
   // Messages, "Continued on iPhone" markers, and the current turn's approval
   // and tool cards, placed just before the reply they belong to.
   const renderThread = () => {
-    const turnCards = turn ? [
-      ...(turn.approvals || []).map((approval) => (
-        <ApprovalCard key={`approval-${approval.requestId}`} approval={approval} onRespond={handleApprovalResponse} />
+    const actions = groupTurnActions(turn);
+    const turnCards = [
+      ...actions.approvals.map(({ approval, result }) => (
+        <ApprovalCard key={`approval-${approval.requestId}`} approval={approval} result={result} onRespond={handleApprovalResponse} />
       )),
-      ...(turn.tools || []).map((event, index) => (
-        <ToolEvent key={`tool-${index}-${event.type}-${event.requestId || ''}`} event={event} />
-      )),
-    ] : [];
+      ...actions.tools.map(([key, event]) => <ToolEvent key={`tool-${key}`} event={event} />),
+    ];
     const items = [];
     let lastOrigin = null;
     let cardsPlaced = false;

@@ -39,7 +39,9 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
     setError('');
     try {
       const result = await createPairing();
-      setPairing({ ...result, expiresAt: Date.now() + result.expires_in * 1000 });
+      const receivedAt = Date.now();
+      setNow(receivedAt);
+      setPairing({ ...result, expiresAt: receivedAt + result.expires_in * 1000 });
     } catch (err) {
       setError(err.message);
     }
@@ -78,7 +80,7 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
   const host = pairing?.url ? new URL(pairing.url).host : '';
 
   const handleUnlink = async (device) => {
-    if (!confirm(`Unlink ${device.name}? It will stop receiving your conversations right away.`)) return;
+    if (!confirm(`Unlink ${device.name}? It stops working right away.`)) return;
     try {
       await unlinkDevice(device.id);
       loadDevices();
@@ -101,7 +103,7 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
             <div>
               <h2 id="continuity-title" className="text-sm font-bold text-zinc-100">Continue on iPhone</h2>
               <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
-                Pick up any conversation on your phone. Everything keeps running on {pairing?.computer_name || 'this Mac'}.
+                Pick up any chat on your iPhone.
               </p>
             </div>
           </div>
@@ -115,9 +117,8 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
             <div className="flex gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-200">
               <FiAlertTriangle className="text-amber-400 text-sm flex-shrink-0 mt-0.5" />
               <p>
-                Your iPhone can&apos;t reach this Mac yet: Open Dots is only listening on this computer.
-                Quit it and start it with <code className="font-mono text-amber-100">./scripts/start-mac.sh</code> so
-                devices on your Wi-Fi can connect.
+                Your iPhone can&apos;t connect yet. Restart Open Dots with{' '}
+                <code className="font-mono text-amber-100">./scripts/start-mac.sh</code>.
               </p>
             </div>
           )}
@@ -125,7 +126,7 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
           {linked && (
             <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-[11px] text-emerald-300 animate-fade-in">
               <FiCheck className="text-sm flex-shrink-0" />
-              <p>{linked.name} is linked. Your conversations are on it now.</p>
+              <p>{linked.name} is linked.</p>
             </div>
           )}
 
@@ -134,18 +135,18 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
               {pairing?.qr ? <QrCode rows={pairing.qr.rows} /> : <div className="w-full h-full bg-zinc-200 animate-pulse rounded-lg" />}
             </div>
             <div className="min-w-0 space-y-2">
-              <p className="text-xs font-semibold text-zinc-100">Scan with your iPhone camera</p>
+              <p className="text-xs font-semibold text-zinc-100">Scan with your iPhone</p>
               <p className="text-[11px] text-zinc-400 leading-relaxed">
-                Or open <span className="font-mono text-zinc-300 break-all">{host || '…'}</span> in Safari and enter:
+                Or go to <span className="font-mono text-zinc-300 break-all">{host || '…'}</span> in Safari and enter:
               </p>
               <p className="font-mono text-lg font-semibold tracking-[0.15em] text-white select-all">{pairing?.code || '····-····'}</p>
               {expired ? (
                 <button onClick={newCode} className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-400 hover:text-blue-300">
-                  <FiRefreshCw /> Show a new code
+                  <FiRefreshCw /> Get a new code
                 </button>
               ) : (
                 <p className="text-[10px] text-zinc-500 font-mono">
-                  {pairing ? `Expires in ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}` : 'Preparing a code…'}
+                  {pairing ? `Expires in ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}` : 'Getting a code…'}
                 </p>
               )}
             </div>
@@ -156,7 +157,7 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
           <div className="border-t border-[#2b2b32] pt-3">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-2">Linked devices</p>
             {devices.length === 0 ? (
-              <p className="text-[11px] text-zinc-500">No devices yet.</p>
+              <p className="text-[11px] text-zinc-500">None yet</p>
             ) : (
               <ul className="space-y-1">
                 {devices.map((device) => (
@@ -166,7 +167,7 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
                       <div className="min-w-0">
                         <p className="text-xs text-zinc-200 truncate">{device.name}</p>
                         <p className="text-[10px] text-zinc-500">
-                          Linked {relative(device.created_at)} · active {relative(device.last_seen_at)}
+                          Active {relative(device.last_seen_at)}
                         </p>
                       </div>
                     </div>
@@ -180,7 +181,7 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
           </div>
 
           <p className="text-[10px] text-zinc-500 leading-relaxed">
-            Conversations are stored only on this Mac, and your iPhone connects to it directly — no cloud relay. Linked devices can chat and answer approvals, but can&apos;t change settings or keys.
+            Your iPhone connects straight to this Mac, with no cloud in between. It can chat and approve actions, but not change settings.
           </p>
         </div>
       </section>

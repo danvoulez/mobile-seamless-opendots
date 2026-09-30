@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Start Open Dots on this Mac so your iPhone can continue your conversations.
 #
-#   ./scripts/start-mac.sh                     start (sets everything up on first run)
-#   ./scripts/start-mac.sh --no-open           start without opening the browser
-#   ./scripts/start-mac.sh --install-login-item  start Open Dots whenever you log in
-#   ./scripts/start-mac.sh --remove-login-item   stop starting it at login
+#   ./scripts/start-mac.sh                       start (sets everything up on first run)
+#   ./scripts/start-mac.sh --no-open             start without opening the browser
+#   ./scripts/start-mac.sh --install-login-item  keep it running in the background
+#   ./scripts/start-mac.sh --remove-login-item   stop running it in the background
 #
 # The API listens on your local network so a linked iPhone can reach it; the
 # web client stays on this Mac. While Open Dots runs, the Mac is kept from
@@ -44,14 +44,28 @@ install_login_item() {
 PLIST
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  echo "Open Dots now starts when you log in (log: ~/Library/Logs/OpenDots.log)."
-  echo "Open http://localhost:$WEB_PORT on this Mac."
+  echo "Open Dots now runs in the background and starts when you log in."
+  echo "Log: ~/Library/Logs/OpenDots.log"
 }
 
 remove_login_item() {
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$PLIST"
-  echo "Open Dots no longer starts at login."
+  echo "Open Dots no longer runs in the background."
+}
+
+api_ready() {
+  curl -fsS "http://127.0.0.1:$API_PORT/api/v1/health" >/dev/null 2>&1
+}
+
+web_ready() {
+  curl -fsS "http://127.0.0.1:$WEB_PORT" >/dev/null 2>&1
+}
+
+open_web() {
+  if [ "$OPEN_BROWSER" = 1 ] && command -v open >/dev/null 2>&1; then
+    open "http://localhost:$WEB_PORT" || true
+  fi
 }
 
 for arg in "$@"; do
@@ -63,6 +77,13 @@ for arg in "$@"; do
     *) echo "Unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
+
+# Already running (for example in the background): just open it.
+if api_ready && web_ready; then
+  echo "Open Dots is already running: http://localhost:$WEB_PORT"
+  open_web
+  exit 0
+fi
 
 need() {
   command -v "$1" >/dev/null 2>&1 || { echo "Open Dots needs $1. $2" >&2; exit 1; }
@@ -94,6 +115,27 @@ if [ ! -f .next/BUILD_ID ] || [ -n "$(find app components lib -newer .next/BUILD
   npm run build
 fi
 
+# ----- keep it running ----------------------------------------------------------
+
+# Your iPhone can only reach the Mac while Open Dots runs, so offer once to keep
+# it running in the background (it then also starts when you log in).
+ASKED="${DATA_DIR:-$HOME/.open-dots}/.background-asked"
+if [ -t 0 ] && command -v launchctl >/dev/null 2>&1 && [ ! -f "$PLIST" ] && [ ! -f "$ASKED" ]; then
+  mkdir -p "$(dirname "$ASKED")" && touch "$ASKED"
+  printf "Keep Open Dots running in the background, so your iPhone can always reach this Mac? [Y/n] "
+  read -r answer || answer=n
+  case "$answer" in
+    [nN]*) ;;
+    *)
+      install_login_item
+      for _ in $(seq 1 120); do api_ready && web_ready && break; sleep 0.5; done
+      echo "Open Dots is running: http://localhost:$WEB_PORT"
+      open_web
+      exit 0
+      ;;
+  esac
+fi
+
 # ----- run ----------------------------------------------------------------------
 
 PIDS=""
@@ -121,28 +163,24 @@ fi
 PIDS="$PIDS $!"
 
 for _ in $(seq 1 60); do
-  curl -fsS "http://127.0.0.1:$API_PORT/api/v1/health" >/dev/null 2>&1 && break
+  api_ready && break
   kill -0 "$SERVER_PID" 2>/dev/null || { echo "The Open Dots server stopped. See the messages above." >&2; exit 1; }
   sleep 0.5
 done
 
 DATA_DIR_SHOWN="${DATA_DIR:-~/.open-dots}"
-cat <<EOF
+cat <<MESSAGE
 
   Open Dots is running.
 
   On this Mac     http://localhost:$WEB_PORT
-                  First time? Sign in with the owner token: cat $DATA_DIR_SHOWN/.auth-token
-  On your iPhone  In Open Dots on this Mac, choose "Continue on iPhone" and
-                  scan the code with the iPhone camera (same Wi-Fi).
+  On your iPhone  Choose "Continue on iPhone" in Open Dots and scan the code.
 
+  First sign-in: cat $DATA_DIR_SHOWN/.auth-token
   If macOS asks whether Python may accept incoming connections, choose Allow.
   Press Ctrl+C to stop.
 
-EOF
+MESSAGE
 
-if [ "$OPEN_BROWSER" = 1 ] && command -v open >/dev/null 2>&1; then
-  open "http://localhost:$WEB_PORT" || true
-fi
-
+open_web
 wait "$SERVER_PID"

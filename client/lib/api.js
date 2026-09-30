@@ -424,37 +424,56 @@ export async function postThreadMessage(threadId, { text, imageUrl = null, model
 
 // One live stream for the whole workspace: messages, reply deltas, approvals
 // and conversation list changes from this computer and linked devices.
+// Staying connected is the normal state: it reconnects on its own, notices a
+// stream that died silently, and only reports trouble that lasts.
 export function subscribeToEvents(onEvent, onStatus) {
   let source = null;
   let retryTimer = null;
+  let troubleTimer = null;
   let retryDelay = 1000;
+  let lastEventAt = Date.now();
   let closed = false;
 
-  const connect = () => {
+  const trouble = () => {
+    if (!troubleTimer) troubleTimer = setTimeout(() => onStatus?.('reconnecting'), 3000);
+  };
+
+  const retry = () => {
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(connect, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 5000);
+  };
+
+  function connect() {
     if (closed) return;
+    source?.close();
+    source = null;
+    lastEventAt = Date.now();
     ensureSession()
       .then(() => {
         if (closed) return;
         source = new EventSource(`${API_BASE_URL}/events`, { withCredentials: true });
         source.onmessage = (e) => {
+          lastEventAt = Date.now();
           try {
             const event = JSON.parse(e.data);
             if (event.type === 'hello') {
               retryDelay = 1000;
+              clearTimeout(troubleTimer);
+              troubleTimer = null;
               onStatus?.('live');
             }
-            onEvent(event);
+            if (event.type !== 'heartbeat') onEvent(event);
           } catch (err) {
             console.warn('Failed to parse event payload:', err);
           }
         };
         source.onerror = () => {
-          onStatus?.('reconnecting');
-          if (source.readyState !== EventSource.CLOSED) return; // the browser retries
+          trouble();
+          if (source?.readyState !== EventSource.CLOSED) return; // the browser retries
           source = null;
           sessionPromise = null;
-          retryTimer = setTimeout(connect, retryDelay);
-          retryDelay = Math.min(retryDelay * 2, 15000);
+          retry();
         };
       })
       .catch((error) => {
@@ -462,16 +481,22 @@ export function subscribeToEvents(onEvent, onStatus) {
           sessionExpired();
           return;
         }
-        onStatus?.('reconnecting');
-        retryTimer = setTimeout(connect, retryDelay);
-        retryDelay = Math.min(retryDelay * 2, 15000);
+        trouble();
+        retry();
       });
-  };
+  }
+
+  // The server sends a heartbeat every 15 s; silence means the stream died.
+  const watchdog = setInterval(() => {
+    if (!closed && source && Date.now() - lastEventAt > 40000) connect();
+  }, 5000);
 
   connect();
   return () => {
     closed = true;
     clearTimeout(retryTimer);
+    clearTimeout(troubleTimer);
+    clearInterval(watchdog);
     source?.close();
   };
 }

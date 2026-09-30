@@ -10,7 +10,7 @@ from app.routers import auth, bots, models, chat, approvals, upload, settings as
 from app.services.auth_service import auth_service
 from app.services.computer_provider import computer_provider
 from app.services.device_service import device_may_access, device_service, format_code, normalize_code
-from app.services.host_info import device_label
+from app.services.host_info import device_label, device_noun
 from app.services.storage_service import storage_service
 
 app = FastAPI(
@@ -73,7 +73,7 @@ async def require_authentication(request: Request, call_next):
         # Linked phones continue conversations; everything else stays on the computer.
         if not device_may_access(request.method, path):
             return JSONResponse(
-                {"detail": "Linked devices can't do this. Use Open Dots on your computer."},
+                {"detail": f"Use Open Dots on your {device_noun()} for this."},
                 status_code=403,
             )
         user = auth_service.user

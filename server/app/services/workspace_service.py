@@ -26,10 +26,12 @@ class WorkspaceToolCall:
     @property
     def summary(self) -> str:
         if self.name == "workspace.read":
-            return f"Read the workspace file: {self.path}"
+            return f"Read {self.path}"
         if self.name == "workspace.write":
-            return f"Write {len(self.content or '')} characters to: {self.path}"
-        return f"List the workspace directory: {self.path}"
+            return f"Save changes to {self.path}"
+        if self.path in {"", "."}:
+            return "List the files in your project folder"
+        return f"List the files in {self.path}"
 
 
 def parse_workspace_command(prompt: str) -> Optional[WorkspaceToolCall]:

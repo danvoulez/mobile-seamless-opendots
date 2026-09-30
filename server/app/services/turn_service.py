@@ -147,7 +147,7 @@ class TurnService:
 
     def start(self, thread_id: str, bot_id: str, model: Optional[str] = None) -> TurnState:
         if thread_id in self.active:
-            raise TurnInProgressError("A reply is already in progress in this conversation.")
+            raise TurnInProgressError("Wait for the reply to finish.")
         bot = self._bot(bot_id)
         selected_model = model or (bot or {}).get("model") or (
             self.storage.get_settings().get("default_model") or settings.DEFAULT_MODEL
@@ -183,10 +183,10 @@ class TurnService:
             await self._run_turn(state, bot)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # A failed turn must never leave a thread stuck.
+        except Exception:  # A failed turn must never leave a thread stuck.
             logger.exception("Turn %s failed", state.turn_id)
             if state.status == "running":
-                note = f"The reply stopped unexpectedly ({type(exc).__name__})."
+                note = "The reply stopped unexpectedly."
                 state.text = f"{state.text}\n\n{note}" if state.text else note
                 self._finish(state, ok=False)
         finally:
@@ -250,7 +250,7 @@ class TurnService:
             "thread_id": state.thread_id,
             "bot_id": state.bot_id,
             "sender": "bot",
-            "text": state.text or ("" if ok else "The reply could not be completed."),
+            "text": state.text or ("" if ok else "The reply couldn't be completed."),
             "created_at": local_now(),
             "model": state.model,
             "item_type": "assistant_text" if ok else "assistant_error",

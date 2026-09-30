@@ -38,6 +38,11 @@ def device_label() -> str:
     return "Mac" if is_mac() else "Computer"
 
 
+def device_noun() -> str:
+    """The same word as used mid-sentence: "your Mac", "your computer"."""
+    return "Mac" if is_mac() else "computer"
+
+
 @lru_cache(maxsize=1)
 def mdns_hostname() -> Optional[str]:
     """The Bonjour name (``name.local``) that stays valid when the IP changes."""

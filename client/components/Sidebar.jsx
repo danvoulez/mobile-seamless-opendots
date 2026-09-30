@@ -158,7 +158,7 @@ export default function Sidebar({
             <MascotAvatar type={avatarFor(draftBotId)} size="md" />
             <div className="flex-1 min-w-0 pt-0.5">
               <h3 className="text-xs font-semibold truncate text-white">New chat</h3>
-              <p className="text-[11px] truncate mt-0.5 text-zinc-400">{botName(draftBotId)} · say something to start</p>
+              <p className="text-[11px] truncate mt-0.5 text-zinc-400">{botName(draftBotId)}</p>
             </div>
           </div>
         )}
@@ -185,7 +185,7 @@ export default function Sidebar({
                   </h3>
                   <span className="flex items-center gap-1 flex-shrink-0">
                     {row.fromDevice && (
-                      <FiSmartphone className="text-[10px] text-blue-400" title={`Last message from ${row.fromDevice}`} />
+                      <FiSmartphone className="text-[10px] text-blue-400" title={`Sent from ${row.fromDevice}`} />
                     )}
                     {row.time && (
                       <span className="text-[10px] text-zinc-400 font-normal ml-1 group-hover:hidden">
@@ -197,12 +197,12 @@ export default function Sidebar({
                         suppressHydrationWarning={true}
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (confirm(`Delete "${row.name}"? It is removed from this Mac and every linked device.`)) {
+                          if (confirm(`Delete "${row.name}"? This can't be undone.`)) {
                             onDeleteThread(row.id);
                           }
                         }}
                         className="hidden group-hover:block text-zinc-500 hover:text-rose-400 transition"
-                        title="Delete conversation"
+                        title="Delete chat"
                       >
                         <FiTrash2 className="text-[11px]" />
                       </button>
@@ -226,7 +226,7 @@ export default function Sidebar({
 
         {rows.length === 0 && !draftBotId && (
           <p className="px-3 py-6 text-center text-[11px] text-zinc-500">
-            Your conversations will show up here.
+            No chats yet
           </p>
         )}
       </div>
@@ -288,7 +288,7 @@ export default function Sidebar({
 
           <div className="flex items-center gap-1">
             {connection !== 'live' && (
-              <span className="text-[10px] text-amber-400" title="Reconnecting to the Open Dots server">Reconnecting…</span>
+              <span className="text-[10px] text-amber-400">Reconnecting…</span>
             )}
             <button
               suppressHydrationWarning={true}

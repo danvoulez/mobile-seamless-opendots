@@ -90,8 +90,34 @@ export function applyChatEvent(chat, event) {
     default:
       if (event.type?.startsWith('tool.') && turn) {
         const { threadId, ...tool } = event;
-        return { ...chat, turn: { ...turn, tools: [...turn.tools, tool].slice(-5) } };
+        return { ...chat, turn: { ...turn, tools: [...turn.tools, tool].slice(-10) } };
       }
       return chat;
   }
+}
+
+// Plain names for what an action touches, instead of internal tool ids.
+export function toolLabel(name) {
+  const [family, action = ''] = String(name || '').split('.');
+  if (family === 'connector') return action.startsWith('github') ? 'GitHub' : 'Apps';
+  return { workspace: 'Files', search: 'Web search', computer: 'Computer' }[family] || 'Action';
+}
+
+export const TOOL_STATUS = {
+  started: 'Working…',
+  completed: 'Done',
+  failed: "Didn't work",
+  denied: 'Skipped',
+  expired: 'Skipped',
+};
+
+// One card per action: an approval carries its action's latest result, and
+// other actions show only their latest state.
+export function groupTurnActions(turn) {
+  if (!turn) return { approvals: [], tools: [] };
+  const latest = new Map();
+  (turn.tools || []).forEach((event, index) => latest.set(event.requestId || `i${index}`, event));
+  const approvals = (turn.approvals || []).map((approval) => ({ approval, result: latest.get(approval.requestId) }));
+  const approved = new Set(approvals.map(({ approval }) => approval.requestId));
+  return { approvals, tools: [...latest.entries()].filter(([key]) => !approved.has(key)) };
 }

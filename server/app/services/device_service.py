@@ -19,7 +19,7 @@ from fastapi import Request, Response
 
 from app.config import settings
 from app.services.database import Database
-from app.services.host_info import device_label
+from app.services.host_info import device_label, device_noun
 from app.services.storage_service import local_now, storage_service
 
 
@@ -114,7 +114,7 @@ class DeviceService:
             if self._failures >= MAX_FAILED_ATTEMPTS:
                 # Too many guesses: void every outstanding code.
                 self._codes.clear()
-            raise PairingError("That code isn't valid anymore. Show a new one on your computer.")
+            raise PairingError(f"That code expired or was already used. Get a new one on your {device_noun()}.")
 
         token = DEVICE_TOKEN_PREFIX + secrets.token_urlsafe(32)
         now = local_now()

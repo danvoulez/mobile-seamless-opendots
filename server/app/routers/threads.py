@@ -84,7 +84,7 @@ async def post_message(thread_id: str, body: ThreadMessageRequest, request: Requ
     if not body.text.strip() and not body.image_url:
         raise HTTPException(status_code=422, detail="Write a message or attach an image.")
     if turn_service.status(thread_id) != "idle":
-        raise HTTPException(status_code=409, detail="A reply is still in progress in this conversation.")
+        raise HTTPException(status_code=409, detail="Wait for the reply to finish.")
 
     bot = next((b for b in storage_service.get_bots() if b.get("id") == thread.get("bot_id")), None)
     model = body.model or (bot or {}).get("model") or storage_service.get_settings().get("default_model")

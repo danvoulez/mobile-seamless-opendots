@@ -81,7 +81,7 @@ The first run creates the Python environment, installs and builds the web client
 
 The script makes the API listen on your local network so the phone can reach it (the web client itself stays on the Mac), and it keeps the Mac from idle-sleeping while Open Dots runs. The display can still sleep; set `OPEN_DOTS_ALLOW_SLEEP=1` to allow system sleep too. If macOS asks whether Python may accept incoming connections, choose **Allow**.
 
-To start Open Dots whenever you log in, run `./scripts/start-mac.sh --install-login-item`. To undo it, run `--remove-login-item`.
+The first time, the script offers to keep Open Dots running in the background, so it is always there for your iPhone, even after a restart. You can turn that on or off later with `--install-login-item` and `--remove-login-item`.
 
 ### Link your iPhone
 
@@ -96,7 +96,8 @@ The code works once and expires after 10 minutes. You can also type the address 
 - **Conversations:** both devices show the same chats, newest first, and the phone offers a **Continue** card for the conversation you were just in. Messages record which device sent them, so a thread shows where it was *Continued on iPhone* or on the Mac.
 - **Replies:** a reply runs on the Mac, not in the browser. Locking the phone or closing the tab doesn't stop it. Open the chat on either device, even mid-reply, and it catches up.
 - **Approvals:** a request for approval appears on every open device and can be answered on any of them.
-- **When the Mac is away:** if the Mac sleeps or leaves the network while Open Dots is open on the phone, it keeps your recent chats on screen and reconnects by itself. The app itself is served by the Mac, so opening it from the Home Screen while the Mac is unreachable only works over HTTPS (see Tailscale below), where the phone keeps a copy of the app. Over plain local-network HTTP, iOS shows a connection error until the Mac is back.
+- **Staying connected:** the phone keeps its connection to the Mac on its own. It reconnects after the phone wakes or changes networks, notices a connection that died silently, and never asks you to retry. If the Mac sleeps or leaves the network, your chats stay on screen, and anything you write, including a new chat, waits on the phone and is sent as soon as the Mac is back.
+- **Opening the app while the Mac is away:** the app itself is served by the Mac, so this only works over HTTPS (see Tailscale below), where the phone keeps a copy of the app. Over plain local-network HTTP, iOS shows a connection error until the Mac is back.
 
 ### Linked devices
 

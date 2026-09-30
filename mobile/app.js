@@ -44,7 +44,7 @@ const ICONS = {
   share: [['path', { d: 'M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8' }], ['polyline', { points: '16 6 12 2 8 6' }], ['line', { x1: 12, y1: 2, x2: 12, y2: 15 }]],
   add: [['rect', { x: 3, y: 3, width: 18, height: 18, rx: 2, ry: 2 }], ['line', { x1: 12, y1: 8, x2: 12, y2: 16 }], ['line', { x1: 8, y1: 12, x2: 16, y2: 12 }]],
   monitor: [['rect', { x: 2, y: 3, width: 20, height: 14, rx: 2, ry: 2 }], ['line', { x1: 8, y1: 21, x2: 16, y2: 21 }], ['line', { x1: 12, y1: 17, x2: 12, y2: 21 }]],
-  alert: [['circle', { cx: 12, cy: 12, r: 10 }], ['line', { x1: 12, y1: 8, x2: 12, y2: 12 }], ['line', { x1: 12, y1: 16, x2: 12.01, y2: 16 }]],
+  clock: [['circle', { cx: 12, cy: 12, r: 10 }], ['polyline', { points: '12 6 12 12 16 14' }]],
 };
 
 function icon(name, cls = 'icon') {
@@ -176,15 +176,14 @@ const cache = storage.get('od:cache') || {};
 const state = {
   phase: 'boot', // boot | pair | app
   computer: cache.computer || 'your Mac',
-  computerKind: 'Mac',
+  computerKind: 'Mac', // as used mid-sentence: "your Mac", "your computer"
   device: cache.device || null,
-  connection: 'connecting', // connecting | live | offline
+  connection: 'connecting', // connecting | live | reconnecting
   bots: cache.bots || [],
   threads: cache.threads || [],
   search: '',
   chat: null, // { threadId, botId, thread, messages, turn, loading }
   composer: { text: '', image: null },
-  sending: false,
   drafts: new Map(),
   approvalsBusy: new Set(),
 };
@@ -208,21 +207,21 @@ function avatarType(botId) {
 }
 
 function threadTitle(thread) {
-  return thread?.title || botFor(thread?.bot_id)?.name || 'Conversation';
+  return thread?.title || botFor(thread?.bot_id)?.name || 'New chat';
 }
 
-function sortThreads() {
-  state.threads.sort((a, b) => (parseTime(b.updated_at) || 0) - (parseTime(a.updated_at) || 0));
+function byNewest(a, b) {
+  return (parseTime(b.updated_at) || 0) - (parseTime(a.updated_at) || 0);
 }
 
 function upsertThread(summary) {
   const index = state.threads.findIndex((thread) => thread.id === summary.id);
   if (index >= 0) state.threads[index] = summary;
   else state.threads.push(summary);
-  sortThreads();
+  state.threads.sort(byNewest);
   if (state.chat?.threadId === summary.id) {
     state.chat.thread = summary;
-    schedule(renderChatHeader, renderComposer);
+    schedule(renderChatHeader);
   }
   schedule(renderList);
 }
@@ -234,10 +233,6 @@ function upsertMessage(message) {
   if (index >= 0) chat.messages[index] = message;
   else chat.messages.push(message);
   schedule(renderMessages);
-}
-
-function turnRunning() {
-  return state.chat?.turn?.status === 'running';
 }
 
 // Batch DOM work into one frame; streaming sends many small updates.
@@ -253,6 +248,115 @@ function schedule(...renders) {
     pendingRenders.clear();
     renders.forEach((render) => render());
   });
+}
+
+// ------------------------------------------------------------------ outbox
+
+// Everything you send goes through here. While the Mac is away, messages (and
+// new chats) wait, survive the app closing, and go out once it's back.
+let outbox = (storage.get('od:outbox') || []).map((item) => ({ ...item, status: 'waiting' }));
+let flushing = false;
+
+function saveOutbox() {
+  storage.set('od:outbox', outbox.map(({ status, ...item }) => item));
+}
+
+const isLocal = (threadId) => String(threadId || '').startsWith('local-');
+
+function queuedFor(threadId) {
+  return outbox.filter((item) => (item.threadId || item.localId) === threadId);
+}
+
+function titleFrom(text) {
+  const line = (text || '').split('\n').map((part) => part.trim()).find(Boolean) || '';
+  return line.length > 60 ? `${line.slice(0, 59).trimEnd()}…` : line || 'Photo';
+}
+
+// New chats that exist only here until the Mac creates them.
+function localThreads() {
+  const threads = new Map();
+  for (const item of outbox) {
+    if (item.threadId || threads.has(item.localId)) continue;
+    threads.set(item.localId, {
+      id: item.localId,
+      bot_id: item.botId,
+      title: titleFrom(item.text),
+      updated_at: item.createdAt,
+      last_message: { sender: 'user', text: item.text, created_at: item.createdAt, has_image: Boolean(item.imageUrl) },
+      status: 'idle',
+    });
+  }
+  return [...threads.values()];
+}
+
+function allThreads() {
+  return [...localThreads(), ...state.threads].sort(byNewest);
+}
+
+function threadBusy(threadId) {
+  const status = state.threads.find((thread) => thread.id === threadId)?.status;
+  return status === 'running' || status === 'waiting';
+}
+
+async function createThreadFor(item) {
+  const thread = await api('/threads', { method: 'POST', body: { bot_id: item.botId } });
+  for (const other of outbox) {
+    if (other.localId === item.localId) other.threadId = thread.id;
+  }
+  saveOutbox();
+  upsertThread(thread);
+  if (state.chat?.threadId === item.localId) {
+    state.chat.threadId = thread.id;
+    state.chat.thread = thread;
+  }
+}
+
+async function flush() {
+  if (flushing || state.phase !== 'app' || !outbox.length) return;
+  flushing = true;
+  try {
+    for (const item of [...outbox]) {
+      if (!outbox.includes(item)) continue;
+      if (item.threadId && threadBusy(item.threadId)) continue; // goes out when the reply ends
+      item.status = 'sending';
+      schedule(renderMessages);
+      try {
+        if (!item.threadId) await createThreadFor(item);
+        const result = await api(`/threads/${encodeURIComponent(item.threadId)}/messages`, {
+          method: 'POST',
+          body: { text: item.text, image_url: item.imageUrl || null, client_id: item.clientId },
+        });
+        outbox = outbox.filter((other) => other !== item);
+        saveOutbox();
+        const chat = state.chat;
+        if (chat?.threadId === item.threadId) {
+          upsertMessage(result.message);
+          if (!chat.turn || chat.turn.botMsgId !== result.turn.botMsgId) chat.turn = result.turn;
+          schedule(renderChatHeader);
+        }
+      } catch (error) {
+        item.status = 'waiting';
+        if (error.status === 0) {
+          markTrouble();
+          break; // the Mac is away; everything waits for the reconnect
+        }
+        if (error.status === 409 || error.status === 401) continue;
+        // Refused for good (for example, the chat was deleted): give the text back.
+        outbox = outbox.filter((other) => other !== item);
+        saveOutbox();
+        if (state.chat && (state.chat.threadId === item.threadId || state.chat.threadId === item.localId) && !els.textarea.value) {
+          els.textarea.value = item.text;
+          state.composer.text = item.text;
+          autosize();
+        }
+        toast(error.message);
+      } finally {
+        schedule(renderMessages, renderList, renderChatHeader);
+      }
+    }
+  } finally {
+    flushing = false;
+  }
 }
 
 // ---------------------------------------------------------------- viewport
@@ -303,24 +407,23 @@ function renderPair({ mode = 'enter', code = '', error = '' } = {}) {
 
   if (mode === 'install') {
     body = [
-      h('h2', null, 'Add Open Dots to your Home Screen'),
-      h('p', { class: 'muted' }, `It opens full screen and stays linked to your ${kind}.`),
+      h('h2', null, 'Add to Home Screen'),
       h('ol', { class: 'steps' },
-        h('li', null, h('span', { class: 'step-icon' }, icon('share')), h('span', null, 'Tap ', h('b', null, 'Share'), ' in Safari')),
-        h('li', null, h('span', { class: 'step-icon' }, icon('add')), h('span', null, 'Choose ', h('b', null, 'Add to Home Screen'))),
-        h('li', null, h('span', { class: 'step-icon' }, mascot('blue', 'xs')), h('span', null, 'Open ', h('b', null, 'Open Dots'), ' from your Home Screen')),
+        h('li', null, h('span', { class: 'step-icon' }, icon('share')), h('span', null, 'Tap ', h('b', null, 'Share'))),
+        h('li', null, h('span', { class: 'step-icon' }, icon('add')), h('span', null, 'Tap ', h('b', null, 'Add to Home Screen'))),
+        h('li', null, h('span', { class: 'step-icon' }, mascot('blue', 'xs')), h('span', null, 'Open it from your Home Screen')),
       ),
-      h('button', { class: 'btn-text', type: 'button', onclick: () => link(code) }, 'Use in Safari instead'),
+      h('button', { class: 'btn-text', type: 'button', onclick: () => link(code) }, 'Use in Safari'),
     ];
   } else if (mode === 'linking') {
     body = [
-      h('div', { class: 'linking' }, typingDots('dots-lg'), h('p', null, `Linking with your ${kind}…`)),
+      h('div', { class: 'linking' }, typingDots('dots-lg'), h('p', null, `Connecting to your ${kind}…`)),
     ];
   } else {
     const input = h('input', {
       class: 'code-input', id: 'pair-code', name: 'code', value: code, maxlength: 9, required: true,
       placeholder: 'XXXX-XXXX', autocomplete: 'one-time-code', autocapitalize: 'characters',
-      autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'go', 'aria-label': 'Linking code',
+      autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'go', 'aria-label': 'Code',
     });
     input.addEventListener('input', () => {
       const raw = input.value.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8);
@@ -328,14 +431,14 @@ function renderPair({ mode = 'enter', code = '', error = '' } = {}) {
     });
     body = [
       h('h2', null, 'Link this iPhone'),
-      h('p', { class: 'muted' }, `On your ${kind}, open Open Dots and choose `, h('b', null, 'Continue on iPhone'), '. Scan the code with your camera, or type it here.'),
+      h('p', { class: 'muted' }, `On your ${kind}, choose `, h('b', null, 'Continue on iPhone'), '. Then scan the code or type it here.'),
       h('form', {
         class: 'pair-form',
         onsubmit: (event) => {
           event.preventDefault();
           const normalized = normalizeCode(input.value);
           if (!normalized) {
-            renderPair({ mode: 'enter', code: input.value, error: 'Codes look like K7QM-2XRP.' });
+            renderPair({ mode: 'enter', code: input.value, error: `Enter the 8-character code from your ${kind}.` });
             return;
           }
           link(normalized);
@@ -343,7 +446,7 @@ function renderPair({ mode = 'enter', code = '', error = '' } = {}) {
       },
       input,
       error ? h('p', { class: 'error', role: 'alert' }, error) : null,
-      h('button', { class: 'btn-primary', type: 'submit' }, 'Link iPhone')),
+      h('button', { class: 'btn-primary', type: 'submit' }, 'Link')),
     ];
   }
 
@@ -352,11 +455,11 @@ function renderPair({ mode = 'enter', code = '', error = '' } = {}) {
     h('div', { class: 'pair-hero' },
       mascot('blue', 'xl'),
       h('h1', null, 'Open Dots'),
-      h('p', null, `Continue your conversations from your ${kind}, right where you left them.`)),
+      h('p', null, `Your ${kind} conversations, right where you left them.`)),
     h('section', { class: 'window' },
       h('div', { class: 'window-bar', 'aria-hidden': 'true' }, h('i', { class: 'light red' }), h('i', { class: 'light yellow' }), h('i', { class: 'light green' })),
       h('div', { class: 'window-body' }, ...body)),
-    h('p', { class: 'pair-foot' }, `Your conversations stay on your ${kind}. This iPhone talks to it directly over your network — no cloud in between.`),
+    h('p', { class: 'pair-foot' }, `Everything stays on your ${kind}. No cloud in between.`),
   ));
 }
 
@@ -369,9 +472,7 @@ async function link(code) {
     history.replaceState(null, '', '/m/');
     startApp();
   } catch (error) {
-    const message = error.status === 0
-      ? `Can't reach your ${state.computerKind}. Make sure it's awake and on the same Wi-Fi.`
-      : error.message;
+    const message = error.status === 0 ? `Can't reach your ${state.computerKind}. Is it on the same Wi-Fi?` : error.message;
     renderPair({ mode: 'enter', error: message });
   }
 }
@@ -380,11 +481,13 @@ function unlinked() {
   source?.close();
   source = null;
   storage.remove('od:cache');
+  storage.remove('od:outbox');
+  outbox = [];
   state.threads = [];
   state.chat = null;
   state.device = null;
   closeSheet();
-  renderPair({ mode: 'enter', error: 'This iPhone was unlinked. Show a new code on your Mac to link it again.' });
+  renderPair({ mode: 'enter', error: `This iPhone was unlinked. Get a new code on your ${state.computerKind} to link it again.` });
 }
 
 // ------------------------------------------------------------ app skeleton
@@ -394,7 +497,7 @@ const els = {};
 function buildApp() {
   els.status = h('button', { class: 'status', type: 'button', onclick: openSettings });
   els.search = h('input', {
-    class: 'search-input', type: 'search', placeholder: 'Search', 'aria-label': 'Search conversations',
+    class: 'search-input', type: 'search', placeholder: 'Search', 'aria-label': 'Search chats',
     autocomplete: 'off', autocorrect: 'off', enterkeyhint: 'search',
   });
   els.search.addEventListener('input', () => {
@@ -431,12 +534,12 @@ function buildApp() {
   els.composer = h('form', { class: 'composer', onsubmit: (event) => { event.preventDefault(); send(); } },
     els.imageChip,
     h('div', { class: 'pill' },
-      h('button', { class: 'attach-btn', type: 'button', 'aria-label': 'Attach image', onclick: () => els.file.click() }, icon('plus')),
+      h('button', { class: 'attach-btn', type: 'button', 'aria-label': 'Add photo', onclick: () => els.file.click() }, icon('plus')),
       els.textarea,
       els.send),
     els.file);
 
-  els.chat = h('section', { class: 'screen screen-chat', 'aria-label': 'Conversation' },
+  els.chat = h('section', { class: 'screen screen-chat', 'aria-label': 'Chat' },
     h('header', { class: 'chat-header' },
       h('button', { class: 'back-btn', type: 'button', onclick: () => history.back() }, icon('back'), h('span', null, 'Chats')),
       els.chatTitle),
@@ -459,22 +562,23 @@ function startApp() {
 
 // -------------------------------------------------------------- chat list
 
+// Connected is the normal state. Reconnecting is shown calmly and never needs
+// a tap: the app keeps trying on its own.
 function renderStatus() {
-  const labels = {
-    live: state.computer,
-    connecting: 'Connecting…',
-    offline: `${state.computerKind} unavailable`,
-  };
+  const label = state.connection === 'reconnecting' ? 'Reconnecting…' : state.computer;
   els.status.className = `status status-${state.connection}`;
-  els.status.replaceChildren(h('i', { class: 'status-dot' }), h('span', null, labels[state.connection]));
-  els.status.setAttribute('aria-label', `${labels[state.connection]}. Linked device settings`);
+  els.status.replaceChildren(h('i', { class: 'status-dot' }), h('span', null, label));
+  els.status.setAttribute('aria-label', `${label}. Connection details`);
 }
 
 function previewLine(thread) {
   if (thread.status === 'waiting') return h('span', { class: 'badge badge-amber' }, 'Needs your approval');
   if (thread.status === 'running') return h('span', { class: 'live-line' }, typingDots('dots-sm'), 'Replying…');
+  if (queuedFor(thread.id).some((item) => item.status === 'waiting')) {
+    return h('span', { class: 'queued-line' }, icon('clock', 'icon icon-xs'), 'Waiting to send');
+  }
   const message = thread.last_message;
-  if (!message) return 'No messages yet';
+  if (!message) return 'New chat';
   const text = stripMarkdown(message.text) || (message.has_image ? 'Photo' : '');
   const bot = botFor(thread.bot_id);
   const prefix = message.sender === 'user' ? 'You: ' : (thread.title && bot ? `${bot.name}: ` : '');
@@ -491,15 +595,14 @@ function threadRow(thread) {
       h('div', { class: 'row-sub' }, previewLine(thread))));
 }
 
-// The Handoff moment: the conversation that was just active, one tap away.
+// The Handoff moment: the chat that was just active, one tap away.
 function continueCard(thread) {
   const from = thread.last_origin;
-  const mine = state.device?.name;
-  const label = from && from !== mine ? `Continue from ${from}` : 'Pick up where you left off';
+  const elsewhere = from && from !== state.device?.name;
   return h('button', { class: 'continue-card', type: 'button', onclick: () => openThread(thread.id) },
     h('div', { class: 'continue-label' },
-      icon(from && from !== mine ? 'monitor' : 'chevron', 'icon icon-xs'),
-      h('span', null, label),
+      icon(elsewhere ? 'monitor' : 'chevron', 'icon icon-xs'),
+      h('span', null, elsewhere ? `Continue from ${from}` : 'Continue'),
       h('span', { class: 'continue-when' }, ago(thread.updated_at))),
     h('div', { class: 'continue-main' },
       mascot(avatarType(thread.bot_id), 'md'),
@@ -513,21 +616,12 @@ function renderList() {
   if (state.phase !== 'app') return;
   renderStatus();
   const query = state.search.trim().toLowerCase();
-  const threads = state.threads.filter((thread) => !query
+  const threads = allThreads().filter((thread) => !query
     || threadTitle(thread).toLowerCase().includes(query)
     || (thread.last_message?.text || '').toLowerCase().includes(query)
     || (botFor(thread.bot_id)?.name || '').toLowerCase().includes(query));
 
   const children = [];
-  if (state.connection === 'offline') {
-    children.push(h('div', { class: 'banner' },
-      icon('alert', 'icon icon-sm'),
-      h('div', null,
-        h('b', null, `Can't reach ${state.computer}.`),
-        h('span', null, ` Make sure your ${state.computerKind} is awake and on the same network.`)),
-      h('button', { class: 'banner-btn', type: 'button', onclick: () => connect() }, 'Retry')));
-  }
-
   const [first] = threads;
   const recent = first && (first.status !== 'idle'
     || Date.now() - (parseTime(first.updated_at) || 0) < 30 * 60000);
@@ -542,8 +636,8 @@ function renderList() {
   if (!threads.length) {
     children.push(h('div', { class: 'empty' },
       mascot('blue', 'lg'),
-      h('p', { class: 'empty-title' }, query ? 'No matches' : 'No conversations yet'),
-      h('p', { class: 'muted' }, query ? 'Try another word.' : `Start one here or on your ${state.computerKind}.`)));
+      h('p', { class: 'empty-title' }, query ? 'No matches' : 'No chats yet'),
+      query ? null : h('p', { class: 'muted' }, `Start one here or on your ${state.computerKind}.`)));
   }
   els.listBody.replaceChildren(...children);
 }
@@ -575,10 +669,11 @@ window.addEventListener('popstate', () => {
 });
 
 function openThread(threadId) {
-  const thread = state.threads.find((item) => item.id === threadId) || null;
-  state.chat = { threadId, botId: thread?.bot_id, thread, messages: [], turn: null, loading: true };
+  const thread = allThreads().find((item) => item.id === threadId) || null;
+  const local = isLocal(threadId);
+  state.chat = { threadId, botId: thread?.bot_id, thread, messages: [], turn: null, loading: !local };
   showChat();
-  loadChat(threadId);
+  if (!local) loadChat(threadId);
 }
 
 function openDraft(botId) {
@@ -596,7 +691,7 @@ async function loadChat(threadId) {
     if (state.chat?.threadId !== threadId) return;
     if (error.status === 404) {
       history.back();
-      toast('That conversation was deleted.');
+      toast('This chat was deleted.');
     } else if (error.status !== 401) {
       state.chat.loading = false;
       schedule(renderMessages);
@@ -606,14 +701,16 @@ async function loadChat(threadId) {
 
 function applySnapshot(detail) {
   const chat = state.chat;
-  const confirmed = new Set(detail.messages.map((message) => message.client_id).filter(Boolean));
-  const unconfirmed = chat.messages.filter((message) => message.pending && !confirmed.has(message.client_id));
-  chat.messages = [...detail.messages, ...unconfirmed];
   let turn = detail.turn;
   // Deltas that arrived while the snapshot was loading may be ahead of it.
   if (turn && chat.turn?.botMsgId === turn.botMsgId && chat.turn.text.length > turn.text.length) {
     turn = { ...turn, text: chat.turn.text };
   }
+  // Keep anything newer than the snapshot (it may have loaded while sending).
+  const known = new Set(detail.messages.map((message) => message.id));
+  const lastAt = parseTime(detail.messages.at(-1)?.created_at) || 0;
+  const newer = chat.messages.filter((message) => !known.has(message.id) && (parseTime(message.created_at) || 0) > lastAt);
+  chat.messages = [...detail.messages, ...newer];
   chat.turn = turn;
   chat.thread = detail.thread;
   chat.botId = detail.thread.bot_id;
@@ -628,34 +725,42 @@ function renderChatHeader() {
   const chat = state.chat;
   if (!chat) return;
   const bot = botFor(chat.botId);
-  let subtitle = h('span', { class: 'chat-sub' }, bot?.model || '');
-  if (chat.turn?.status === 'running') {
+  const title = chat.thread?.title || bot?.name || 'New chat';
+  let subtitle = null;
+  if (state.connection === 'reconnecting') {
+    subtitle = h('span', { class: 'chat-sub amber' }, 'Reconnecting…');
+  } else if (chat.turn?.status === 'running') {
     subtitle = chat.turn.approvals?.some((approval) => approval.status === 'pending')
       ? h('span', { class: 'chat-sub amber' }, 'Needs your approval')
       : h('span', { class: 'chat-sub blue' }, 'Replying…');
+  } else if (chat.thread?.title && bot) {
+    subtitle = h('span', { class: 'chat-sub' }, bot.name);
   }
   els.chatTitle.replaceChildren(
     mascot(avatarType(chat.botId), 'sm'),
-    h('div', { class: 'chat-title-text' },
-      h('span', { class: 'chat-name' }, chat.thread?.title || bot?.name || 'New chat'),
-      subtitle));
+    h('div', { class: 'chat-title-text' }, h('span', { class: 'chat-name' }, title), subtitle));
   els.textarea.placeholder = `Message ${bot?.name || 'Open Dots'}`;
 }
 
-const messageNodes = new Map(); // key -> { el, sig }
+const messageNodes = new Map(); // key -> { el, sig, content }
 
 function messageItem(message) {
   const key = message.client_id || message.id;
   const time = clock(message.created_at);
   if (message.sender === 'user') {
+    const note = message.queued
+      ? (state.connection === 'live' ? 'Sends after this reply' : `Waiting for your ${state.computerKind}`)
+      : null;
     return {
       key,
-      sig: `u|${message.id}|${message.pending ? 1 : 0}|${time}`,
+      sig: `u|${message.id}|${message.pending ? 1 : 0}|${note}|${time}`,
       build: () => h('div', { class: `msg msg-user${message.pending ? ' pending' : ''}` },
-        h('div', { class: 'bubble bubble-user' },
-          message.image_url ? h('img', { class: 'bubble-image', src: message.image_url, alt: 'Attached image' }) : null,
-          message.text ? h('span', { class: 'bubble-text' }, message.text) : null,
-          time ? h('span', { class: 'bubble-time' }, time) : null)),
+        h('div', { class: 'msg-stack' },
+          h('div', { class: 'bubble bubble-user' },
+            message.image_url ? h('img', { class: 'bubble-image', src: message.image_url, alt: 'Photo' }) : null,
+            message.text ? h('span', { class: 'bubble-text' }, message.text) : null,
+            time ? h('span', { class: 'bubble-time' }, time) : null),
+          note ? h('span', { class: 'msg-note' }, icon('clock', 'icon icon-xs'), note) : null)),
     };
   }
   const isError = message.is_error || /^error:/i.test(message.text || '');
@@ -683,43 +788,77 @@ function messageItem(message) {
   };
 }
 
-function approvalItem(approval) {
+// Plain names for what an action touches.
+function toolLabel(name) {
+  const [family, action = ''] = String(name || '').split('.');
+  if (family === 'connector') return action.startsWith('github') ? 'GitHub' : 'Apps';
+  return { workspace: 'Files', search: 'Web search', computer: 'Computer' }[family] || 'Action';
+}
+
+const TOOL_STATUS = { started: 'Working…', completed: 'Done', failed: "Didn't work", denied: 'Skipped', expired: 'Skipped' };
+
+function resultDetails(event) {
+  if (!event?.result) return null;
+  return h('details', { class: 'tool-details' },
+    h('summary', null, 'Details'),
+    h('pre', null, JSON.stringify(event.result, null, 2)));
+}
+
+function approvalItem(approval, result) {
   const busy = state.approvalsBusy.has(approval.requestId);
-  const decided = { allow: 'Approved', deny: 'Denied', expired: 'Expired' }[approval.status];
+  const pending = approval.status === 'pending';
+  const heading = { pending: 'Approval needed', allow: 'Approved', deny: 'Denied', expired: 'Not answered in time' }[approval.status];
+  const outcome = result && TOOL_STATUS[result.type.replace('tool.', '')];
   return {
     key: `approval-${approval.requestId}`,
-    sig: `${approval.status}|${busy}`,
-    build: () => h('div', { class: 'approval' },
+    sig: `${approval.status}|${busy}|${result?.type || ''}`,
+    build: () => h('div', { class: `approval approval-${approval.status}` },
       h('div', { class: 'approval-head' },
-        h('span', { class: 'approval-kicker' }, icon('shield', 'icon icon-sm'), 'Permission Broker Request'),
-        h('span', { class: 'approval-tool' }, approval.tool || 'action')),
+        h('span', { class: 'approval-kicker' }, icon('shield', 'icon icon-sm'), heading),
+        h('span', { class: 'approval-tool' }, toolLabel(approval.tool))),
       h('div', { class: 'approval-body' },
         h('span', { class: 'approval-icon' }, icon('terminal', 'icon icon-sm')),
-        h('div', null,
-          h('p', { class: 'approval-summary' }, approval.summary || 'An action needs your approval.'),
-          h('p', { class: 'approval-note' }, `The assistant wants to run this on your ${state.computerKind}.`))),
-      decided
-        ? h('div', { class: 'approval-foot' },
-          h('span', null, 'Status:'),
-          h('span', { class: `approval-status ${approval.status}` }, icon(approval.status === 'allow' ? 'check' : 'x', 'icon icon-xs'), decided))
-        : h('div', { class: 'approval-actions' },
+        h('p', { class: 'approval-summary' }, approval.summary || 'An action needs your approval.')),
+      pending
+        ? h('div', { class: 'approval-actions' },
           h('button', { class: 'btn-deny', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'deny') }, icon('x', 'icon icon-sm'), 'Deny'),
-          h('button', { class: 'btn-allow', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'allow') }, icon('check', 'icon icon-sm'), 'Allow Execution'))),
+          h('button', { class: 'btn-allow', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'allow') }, icon('check', 'icon icon-sm'), 'Allow'))
+        : outcome && approval.status === 'allow'
+          ? h('div', { class: 'approval-foot' },
+            h('span', { class: `tool-status ${result.type.replace('tool.', '')}` }, outcome),
+            result.error ? h('span', { class: 'tool-error' }, result.error) : null,
+            resultDetails(result))
+          : null),
   };
 }
 
-function toolItem(event, index) {
+function toolItem(event, key) {
   const status = event.type.replace('tool.', '');
   return {
-    key: `tool-${index}-${event.type}-${event.requestId || ''}`,
+    key: `tool-${key}`,
     sig: status,
     build: () => h('div', { class: 'tool' },
       h('div', { class: 'tool-head' },
-        h('span', { class: 'tool-name' }, event.tool || 'workspace'),
-        h('span', { class: `tool-status ${status}` }, status)),
+        h('span', { class: 'tool-name' }, toolLabel(event.tool)),
+        h('span', { class: `tool-status ${status}` }, TOOL_STATUS[status] || status)),
       event.error ? h('p', { class: 'tool-error' }, event.error) : null,
-      event.result ? h('pre', { class: 'tool-result' }, JSON.stringify(event.result, null, 2)) : null),
+      resultDetails(event)),
   };
+}
+
+// One card per action: approvals carry their own outcome; other actions show
+// only their latest state.
+function turnItems(turn) {
+  if (!turn) return [];
+  const latest = new Map();
+  (turn.tools || []).forEach((event, index) => latest.set(event.requestId || `i${index}`, event));
+  const approved = new Set((turn.approvals || []).map((approval) => approval.requestId));
+  return [
+    ...(turn.approvals || []).map((approval) => approvalItem(approval, latest.get(approval.requestId))),
+    ...[...latest.entries()]
+      .filter(([requestId]) => !approved.has(requestId))
+      .map(([key, event]) => toolItem(event, key)),
+  ];
 }
 
 function chatItems() {
@@ -735,33 +874,40 @@ function chatItems() {
     return items;
   }
 
+  const seen = new Set(chat.messages.map((message) => message.client_id).filter(Boolean));
+  const queued = queuedFor(chat.threadId)
+    .filter((item) => !seen.has(item.clientId))
+    .map((item) => ({
+      id: item.clientId, client_id: item.clientId, sender: 'user', text: item.text, image_url: item.imageUrl,
+      created_at: item.createdAt, origin: state.device?.name || 'iPhone', pending: true, queued: item.status === 'waiting',
+    }));
+  const messages = [...chat.messages, ...queued];
   const turn = chat.turn;
-  const turnItems = turn ? [...(turn.approvals || []).map(approvalItem), ...(turn.tools || []).map(toolItem)] : [];
-  let turnPlaced = false;
+  const cards = turnItems(turn);
+  let cardsPlaced = false;
 
-  if (!chat.messages.length && !turn) {
-    const greeting = { id: 'intro', sender: 'bot', text: `Hello! I am **${bot?.name || 'Open Dots Assistant'}**. Ask me anything, or give me a task to work on!` };
-    items.push(messageItem(greeting));
+  if (!messages.length && !turn) {
+    items.push(messageItem({ id: 'intro', sender: 'bot', text: `Hi, I'm **${bot?.name || 'Open Dots'}**. What can I help with?` }));
   }
 
   let lastOrigin = null;
-  for (const message of chat.messages) {
+  for (const message of messages) {
     if (message.sender === 'user' && message.origin) {
       if (lastOrigin && message.origin !== lastOrigin) {
         const text = `Continued on ${message.origin} · ${clock(message.created_at)}`;
-        items.push({ key: `handoff-${message.id}`, sig: text, build: () => h('div', { class: 'handoff' }, h('span', null, text)) });
+        items.push({ key: `handoff-${message.client_id || message.id}`, sig: text, build: () => h('div', { class: 'handoff' }, h('span', null, text)) });
       }
       lastOrigin = message.origin;
     }
     if (turn && message.id === turn.botMsgId) {
-      items.push(...turnItems);
-      turnPlaced = true;
+      items.push(...cards);
+      cardsPlaced = true;
     }
     items.push(messageItem(message));
   }
 
-  if (turn && !turnPlaced) {
-    items.push(...turnItems);
+  if (turn && !cardsPlaced) {
+    items.push(...cards);
     if (turn.status === 'running') {
       if (turn.text) {
         items.push(messageItem({ id: turn.botMsgId, sender: 'bot', text: turn.text, streaming: true }));
@@ -832,8 +978,8 @@ function autosize() {
 function renderComposer() {
   if (!state.chat) return;
   const { text, image } = state.composer;
-  const ready = (text.trim() || image) && !image?.uploading && !image?.error;
-  els.send.disabled = !ready || state.sending || turnRunning();
+  // Sending never waits for the Mac: the outbox holds messages until it's back.
+  els.send.disabled = !(text.trim() || image);
   els.composer.classList.toggle('multiline', els.textarea.offsetHeight > 30);
 
   if (!image) {
@@ -841,12 +987,11 @@ function renderComposer() {
     els.imageChip.replaceChildren();
     return;
   }
-  const note = image.uploading ? 'Preparing image…' : image.error ? image.error : 'Image ready';
   els.imageChip.classList.remove('hidden');
   els.imageChip.replaceChildren(
-    h('img', { src: image.previewUrl, alt: 'Selected image' }),
-    h('div', { class: 'chip-text' }, h('span', { class: 'chip-name' }, image.name), h('span', { class: image.error ? 'chip-note error' : 'chip-note' }, note)),
-    h('button', { class: 'chip-remove', type: 'button', 'aria-label': 'Remove image', onclick: removeImage }, icon('x', 'icon icon-sm')));
+    h('img', { src: image.previewUrl, alt: 'Selected photo' }),
+    h('span', { class: 'chip-name' }, 'Photo'),
+    h('button', { class: 'chip-remove', type: 'button', 'aria-label': 'Remove photo', onclick: removeImage }, icon('x', 'icon icon-sm')));
 }
 
 function removeImage() {
@@ -871,7 +1016,7 @@ async function downscale(file, maxSide = 1600) {
     canvas.height = Math.round(img.naturalHeight * scale);
     canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
     return await new Promise((resolve, reject) => canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error('Could not prepare the image.'))),
+      (blob) => (blob ? resolve(blob) : reject(new Error('Could not prepare the photo.'))),
       'image/jpeg', 0.85,
     ));
   } finally {
@@ -879,84 +1024,74 @@ async function downscale(file, maxSide = 1600) {
   }
 }
 
-async function pickImage() {
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Prepare the photo right away; upload it now if the Mac is there, otherwise
+// it travels with the message when it's sent.
+function pickImage() {
   const file = els.file.files?.[0];
   els.file.value = '';
   if (!file) return;
   if (!file.type.startsWith('image/')) {
-    toast('Only images can be attached.');
+    toast('Only photos can be added.');
     return;
   }
   removeImage();
-  const image = { name: file.name || 'Photo', previewUrl: URL.createObjectURL(file), uploading: true, url: null, error: null };
+  const image = { previewUrl: URL.createObjectURL(file), url: null };
+  image.ready = (async () => {
+    const blob = await downscale(file).catch(() => file);
+    if (state.connection === 'live') {
+      try {
+        const form = new FormData();
+        const type = blob.type || file.type;
+        form.append('file', blob, `photo.${type === 'image/png' ? 'png' : type === 'image/webp' ? 'webp' : 'jpg'}`);
+        image.url = (await api('/upload', { method: 'POST', form })).url;
+      } catch { /* sent with the message instead */ }
+    }
+    return image.url || blobToDataUrl(blob);
+  })();
   state.composer.image = image;
   renderComposer();
-  image.done = (async () => {
-    try {
-      const blob = await downscale(file).catch(() => file);
-      const form = new FormData();
-      const type = blob.type || file.type;
-      form.append('file', blob, `photo.${type === 'image/png' ? 'png' : type === 'image/webp' ? 'webp' : 'jpg'}`);
-      image.url = (await api('/upload', { method: 'POST', form })).url;
-    } catch (error) {
-      image.error = error.message;
-    } finally {
-      image.uploading = false;
-      if (state.composer.image === image) renderComposer();
-    }
-  })();
 }
 
 async function send() {
   const chat = state.chat;
   const text = els.textarea.value;
   const image = state.composer.image;
-  if ((!text.trim() && !image) || state.sending || turnRunning() || image?.uploading || image?.error) return;
+  if (!text.trim() && !image) return;
 
-  const clientId = `c-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  const optimistic = {
-    id: clientId, client_id: clientId, sender: 'user', text, image_url: image?.previewUrl || null,
-    created_at: new Date().toISOString(), origin: state.device?.name || 'iPhone', pending: true,
-  };
-  state.sending = true;
-  state.drafts.delete(draftKey());
   state.composer = { text: '', image: null };
+  state.drafts.delete(draftKey());
   els.textarea.value = '';
   autosize();
-  chat.messages.push(optimistic);
   renderComposer();
-  renderMessages();
-  stickToBottom(true);
 
-  try {
-    if (!chat.threadId) {
-      const thread = await api('/threads', { method: 'POST', body: { bot_id: chat.botId } });
-      chat.threadId = thread.id;
-      chat.thread = thread;
-      upsertThread(thread);
-    }
-    const result = await api(`/threads/${encodeURIComponent(chat.threadId)}/messages`, {
-      method: 'POST',
-      body: { text, image_url: image?.url || null, client_id: clientId },
-    });
-    if (state.chat !== chat) return;
-    upsertMessage(result.message);
-    if (!chat.turn || chat.turn.botMsgId !== result.turn.botMsgId) chat.turn = result.turn;
-    schedule(renderChatHeader, renderMessages);
-  } catch (error) {
-    chat.messages = chat.messages.filter((message) => message.client_id !== clientId);
-    if (state.chat === chat) {
-      els.textarea.value = text;
-      state.composer.text = text;
-      autosize();
-      schedule(renderMessages);
-    }
-    if (error.status !== 401) toast(error.status === 409 ? 'Wait for the reply to finish.' : error.message);
-  } finally {
-    state.sending = false;
-    if (image) URL.revokeObjectURL(image.previewUrl);
-    renderComposer();
+  let imageUrl = null;
+  if (image) {
+    imageUrl = await image.ready.catch(() => null);
+    URL.revokeObjectURL(image.previewUrl);
+    if (!imageUrl) toast("That photo couldn't be added.");
   }
+  if (!text.trim() && !imageUrl) return;
+
+  const clientId = `c-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const threadId = chat.threadId && !isLocal(chat.threadId) ? chat.threadId : null;
+  const localId = threadId ? null : chat.threadId || `local-${clientId}`;
+  outbox.push({
+    clientId, threadId, localId, botId: chat.botId, text, imageUrl, createdAt: new Date().toISOString(), status: 'waiting',
+  });
+  saveOutbox();
+  if (!chat.threadId) chat.threadId = localId;
+  schedule(renderMessages, renderList);
+  stickToBottom(true);
+  flush();
 }
 
 async function respond(requestId, action) {
@@ -965,7 +1100,7 @@ async function respond(requestId, action) {
   try {
     await api('/approvals/respond', { method: 'POST', body: { request_id: requestId, action } });
   } catch (error) {
-    if (error.status === 404) toast('This request was already answered or has expired.');
+    if (error.status === 404) toast('Already answered.');
     else if (error.status !== 401) toast(error.message);
   } finally {
     state.approvalsBusy.delete(requestId);
@@ -996,8 +1131,8 @@ async function openNewChat() {
       mascot(avatarType(bot.id), 'md'),
       h('div', { class: 'row-main' },
         h('div', { class: 'row-top' }, h('span', { class: 'row-title' }, bot.name)),
-        h('div', { class: 'row-sub' }, bot.role || bot.description || 'Assistant'))))
-    : [h('p', { class: 'muted sheet-note' }, `Assistants you create on your ${state.computerKind} show up here.`)]);
+        h('div', { class: 'row-sub' }, bot.role || bot.description || ''))))
+    : [h('p', { class: 'muted sheet-note' }, `Create assistants on your ${state.computerKind}.`)]);
   const list = h('div', { class: 'sheet-list' }, ...rows());
   openSheet(
     h('div', { class: 'sheet-head' },
@@ -1007,20 +1142,21 @@ async function openNewChat() {
   try {
     state.bots = await api('/bots');
     list.replaceChildren(...rows());
-  } catch { /* the cached roster is shown */ }
+  } catch { /* the saved list is shown */ }
 }
 
 function openSettings() {
   const linked = state.device?.created_at ? parseTime(state.device.created_at) : null;
-  const connection = { live: 'Connected', connecting: 'Connecting…', offline: 'Unavailable' }[state.connection];
   openSheet(
     h('div', { class: 'sheet-head' },
       h('div', { class: 'sheet-computer' },
         h('span', { class: 'computer-icon' }, icon('monitor')),
-        h('div', null, h('h2', null, state.computer), h('p', { class: 'muted' }, `${connection} · ${location.host}`))),
+        h('div', null,
+          h('h2', null, state.computer),
+          h('p', { class: 'muted' }, state.connection === 'live' ? 'Connected' : 'Reconnecting…'))),
       h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: closeSheet }, icon('x'))),
     h('p', { class: 'sheet-copy' },
-      `Your conversations are stored on ${state.computer}, and this iPhone connects to it directly — no cloud relay in between. When your ${state.computerKind} sleeps or leaves the network, Open Dots waits for it.`),
+      `Your chats live on this ${state.computerKind}. When it's away, Open Dots keeps trying and sends what you wrote once it's back.`),
     linked ? h('p', { class: 'muted sheet-note' }, `Linked ${linked.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`) : null,
     state.device
       ? h('button', { class: 'btn-danger', type: 'button', onclick: unlinkThisPhone }, 'Unlink this iPhone')
@@ -1028,7 +1164,7 @@ function openSettings() {
 }
 
 async function unlinkThisPhone() {
-  if (!window.confirm(`Unlink this iPhone from ${state.computer}? You can link it again with a new code.`)) return;
+  if (!window.confirm('Unlink this iPhone? You can link it again anytime.')) return;
   try {
     await api('/devices/current', { method: 'DELETE' });
   } catch (error) {
@@ -1070,38 +1206,51 @@ function enableSwipeBack() {
   });
 }
 
-// ----------------------------------------------------------- live events
+// ------------------------------------------------------ staying connected
+
+// Being connected is the normal state, and the app works to stay there: it
+// reconnects on its own, notices a connection that died silently, and
+// reconnects as soon as the phone wakes up or changes network.
+const RETRY_MAX = 5000;
+const SILENCE_LIMIT = 40000; // the Mac sends a heartbeat every 15 s
+const TROUBLE_GRACE = 3000; // don't flash "Reconnecting…" for a blip
 
 let source = null;
-let offlineTimer = 0;
 let retryTimer = 0;
 let retryDelay = 1000;
+let troubleTimer = 0;
+let lastEventAt = 0;
 let hiddenAt = 0;
 
 function setConnection(value) {
   if (state.connection === value) return;
   state.connection = value;
-  schedule(renderList);
+  schedule(renderList, renderChatHeader, renderMessages);
 }
 
 function markTrouble() {
-  if (state.connection === 'live') setConnection('connecting');
-  if (!offlineTimer) offlineTimer = setTimeout(() => { offlineTimer = 0; setConnection('offline'); }, 4000);
+  if (state.connection === 'reconnecting' || troubleTimer) return;
+  troubleTimer = setTimeout(() => {
+    troubleTimer = 0;
+    setConnection('reconnecting');
+  }, TROUBLE_GRACE);
 }
 
 function connect() {
   clearTimeout(retryTimer);
+  retryTimer = 0;
   source?.close();
-  if (state.connection === 'live') setConnection('connecting');
+  lastEventAt = Date.now();
   source = new EventSource('/api/v1/events');
   source.onmessage = (message) => {
+    lastEventAt = Date.now();
     let event;
     try { event = JSON.parse(message.data); } catch { return; }
     handleEvent(event);
   };
   source.onerror = async () => {
     markTrouble();
-    if (source?.readyState !== EventSource.CLOSED) return; // the browser retries by itself
+    if (source?.readyState !== EventSource.CLOSED) return; // the browser retries every 2 s
     source = null;
     // A refused stream is a network problem or a revoked link; tell them apart.
     try {
@@ -1110,16 +1259,21 @@ function connect() {
       if (error.status === 401) return;
     }
     retryTimer = setTimeout(connect, retryDelay);
-    retryDelay = Math.min(retryDelay * 2, 15000);
+    retryDelay = Math.min(retryDelay * 2, RETRY_MAX);
   };
 }
+
+setInterval(() => {
+  if (state.phase !== 'app' || document.hidden) return;
+  if (source ? Date.now() - lastEventAt > SILENCE_LIMIT : !retryTimer) connect();
+}, 5000);
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     hiddenAt = Date.now();
     return;
   }
-  // iOS drops connections in the background; reopen and reload the state.
+  // iOS drops connections in the background; reopen and catch up.
   if (state.phase === 'app' && (!source || source.readyState !== EventSource.OPEN || Date.now() - hiddenAt > 3000)) connect();
 });
 window.addEventListener('online', () => { if (state.phase === 'app') connect(); });
@@ -1128,12 +1282,11 @@ window.addEventListener('pageshow', (event) => { if (event.persisted && state.ph
 async function refreshAll() {
   try {
     const [threads, bots] = await Promise.all([api('/threads'), api('/bots')]);
-    state.threads = threads;
+    state.threads = threads.sort(byNewest);
     state.bots = bots;
-    sortThreads();
     saveCache();
     schedule(renderList);
-    if (state.chat?.threadId) await loadChat(state.chat.threadId);
+    if (state.chat?.threadId && !isLocal(state.chat.threadId)) await loadChat(state.chat.threadId);
     else if (state.chat) schedule(renderChatHeader, renderMessages);
   } catch { /* the connection status already says why */ }
 }
@@ -1145,26 +1298,29 @@ function handleEvent(event) {
 
   switch (event.type) {
     case 'hello':
-      clearTimeout(offlineTimer);
-      offlineTimer = 0;
+      clearTimeout(troubleTimer);
+      troubleTimer = 0;
       retryDelay = 1000;
       if (event.computer) state.computer = event.computer;
       setConnection('live');
-      refreshAll();
+      refreshAll().then(flush);
+      return;
+    case 'heartbeat':
       return;
     case 'resync':
-      refreshAll();
+      refreshAll().then(flush);
       return;
     case 'thread.created':
     case 'thread.updated':
       upsertThread(event.thread);
+      if (event.thread.status === 'idle' && queuedFor(event.thread.id).length) flush();
       return;
     case 'thread.deleted':
       state.threads = state.threads.filter((thread) => thread.id !== event.threadId);
       schedule(renderList);
       if (inChat) {
         history.back();
-        toast('That conversation was deleted.');
+        toast('This chat was deleted.');
       }
       return;
     case 'device.unlinked':
@@ -1183,7 +1339,7 @@ function handleEvent(event) {
       if (chat.turn?.botMsgId !== event.botMsgId || chat.turn.status !== 'running') {
         chat.turn = { turnId: event.turnId, botMsgId: event.botMsgId, model: event.model, status: 'running', text: '', approvals: [], tools: [] };
       }
-      schedule(renderChatHeader, renderMessages, renderComposer);
+      schedule(renderChatHeader, renderMessages);
       break;
     case 'content.delta': {
       if (!turn || turn.botMsgId !== event.botMsgId || event.offset > turn.text.length) {
@@ -1215,12 +1371,12 @@ function handleEvent(event) {
     case 'turn.completed':
       if (turn) turn.status = event.ok ? 'completed' : 'failed';
       if (event.message) upsertMessage(event.message);
-      schedule(renderChatHeader, renderMessages, renderComposer);
+      schedule(renderChatHeader, renderMessages);
       break;
     default:
       if (event.type.startsWith('tool.') && turn) {
         const { threadId, ...tool } = event;
-        turn.tools = [...turn.tools, tool].slice(-5);
+        turn.tools = [...turn.tools, tool].slice(-10);
         schedule(renderMessages);
       }
   }
@@ -1229,7 +1385,7 @@ function handleEvent(event) {
 // -------------------------------------------------------------------- boot
 
 async function boot() {
-  // A cached copy lets the app open while the computer is away (HTTPS only).
+  // A saved copy lets the app open while the computer is away (HTTPS only).
   if ('serviceWorker' in navigator && window.isSecureContext) {
     navigator.serviceWorker.register('/m/sw.js', { scope: '/m/' }).catch(() => {});
   }
@@ -1239,7 +1395,7 @@ async function boot() {
   window.addEventListener('resize', syncViewport);
 
   const health = await fetch('/api/v1/health', { cache: 'no-store' }).then((r) => r.json()).catch(() => null);
-  if (health?.computer_kind) state.computerKind = health.computer_kind;
+  if (health?.computer_kind) state.computerKind = health.computer_kind === 'Mac' ? 'Mac' : health.computer_kind.toLowerCase();
   if (!cache.computer) state.computer = `your ${state.computerKind}`;
 
   const code = normalizeCode(new URLSearchParams(location.search).get('pair'));
@@ -1252,13 +1408,13 @@ async function boot() {
     return;
   } catch (error) {
     if (error.status === 0 && cache.computer) {
-      // Linked before, computer unreachable now: show what we have and keep trying.
-      state.connection = 'offline';
+      // Linked before and the computer is away: show what we have and keep trying.
+      state.connection = 'reconnecting';
       startApp();
       return;
     }
     if (error.status === 0) {
-      renderPair({ mode: 'enter', code: code || '', error: `Can't reach your ${state.computerKind}. Make sure it's awake and on the same Wi-Fi.` });
+      renderPair({ mode: 'enter', code: code || '', error: `Can't reach your ${state.computerKind}. Is it on the same Wi-Fi?` });
       return;
     }
   }
