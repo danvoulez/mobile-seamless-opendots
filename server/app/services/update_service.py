@@ -84,6 +84,8 @@ class UpdateService:
     ):
         self.root = root
         self.status_path = data_dir / "update" / "status.json"
+        # The start script looks for this file every couple of seconds.
+        self.request_path = data_dir / "update" / "requested"
         self.bus = bus
         self.turns = turns
         self.storage = storage
@@ -231,7 +233,15 @@ class UpdateService:
             return
         self.state = "updating"
         self.publish()  # before the restart, so every client can say so
-        os.kill(pid, signal.SIGUSR1)
+        # Ask twice: a file the start script checks every couple of seconds,
+        # which works even where the signal is ignored, and the signal, which
+        # wakes it at once.
+        self.request_path.parent.mkdir(parents=True, exist_ok=True)
+        self.request_path.write_text(_now() + "\n", encoding="utf-8")
+        try:
+            os.kill(pid, signal.SIGUSR1)
+        except OSError:
+            pass
 
     def _maybe_install(self) -> None:
         if self.state == "updating" or self.turns.active or self.unavailable_reason():

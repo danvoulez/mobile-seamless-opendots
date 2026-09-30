@@ -17,6 +17,8 @@ LABEL="dev.opendots.open-dots"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 PIDFILE="$DATA_DIR/open-dots.pid"
 UPDATE_DIR="$DATA_DIR/update"
+# The server asks for an update by creating this file (and sending SIGUSR1).
+UPDATE_REQUEST="$UPDATE_DIR/requested"
 API_PORT=8000   # the web client expects the API here
 WEB_PORT=3000
 

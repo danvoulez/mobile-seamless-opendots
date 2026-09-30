@@ -92,9 +92,14 @@ roll_back() {
   exec "$ROOT/scripts/start-mac.sh" --no-open
 }
 
+update_requested() {
+  [ "$UPDATE_REQUESTED" = 1 ] || [ -f "$UPDATE_REQUEST" ]
+}
+
 # Stop, update, and start again as the new version of this script.
 restart_for_update() {
   say "Installing an update…"
+  rm -f "$UPDATE_REQUEST"
   stop_children
   "$ROOT/scripts/update.sh" apply || true
   exec "$ROOT/scripts/start-mac.sh" --no-open
@@ -172,6 +177,7 @@ main() {
   trap stop EXIT
   trap 'stop; exit 0' INT TERM
   trap 'UPDATE_REQUESTED=1' USR1
+  rm -f "$UPDATE_REQUEST"  # left over from before a restart
 
   start_children
   if ! wait_until_ready; then
@@ -200,10 +206,10 @@ MESSAGE
   # If either part stops, stop both, so a restart (by you, or by the background
   # login item) brings Open Dots back whole.
   while kill -0 "$SERVER_PID" 2>/dev/null && kill -0 "$WEB_PID" 2>/dev/null; do
-    [ "$UPDATE_REQUESTED" = 0 ] || restart_for_update
+    if update_requested; then restart_for_update; fi
     sleep 2
   done
-  [ "$UPDATE_REQUESTED" = 0 ] || restart_for_update
+  if update_requested; then restart_for_update; fi
   warn "Part of Open Dots stopped; stopping the rest."
   exit 1
 }

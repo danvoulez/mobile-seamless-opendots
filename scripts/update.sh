@@ -192,7 +192,9 @@ cmd_check() {
 cmd_now() {
   local pid
   if pid=$(supervisor_pid); then
-    kill -USR1 "$pid" && say "Updating. Open Dots restarts in a moment."
+    mkdir -p "$UPDATE_DIR" && date -u +%Y-%m-%dT%H:%M:%SZ > "$UPDATE_REQUEST"
+    kill -USR1 "$pid" 2>/dev/null || true
+    say "Updating. Open Dots restarts in a moment."
     return
   fi
   cmd_apply || return 1

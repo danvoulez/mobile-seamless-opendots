@@ -193,6 +193,8 @@ class UpdateServiceTests(unittest.IsolatedAsyncioTestCase):
             service._maybe_install()
             self.assertEqual(service.state, "updating")
             self.assertTrue(self.catcher.signalled())
+            # Also asked through a file, for where the signal can't get through.
+            self.assertTrue((self.root / "data" / "update" / "requested").exists())
 
     async def test_automatic_updates_follow_the_setting(self):
         self.repos.publish("New version")

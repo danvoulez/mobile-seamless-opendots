@@ -16,7 +16,21 @@ export OPEN_DOTS_HOME="$WORK/app"
 API=http://127.0.0.1:8000/api/v1
 
 log() { printf '[update-flow] %s\n' "$*"; }
-fail() { log "FAILED: $*"; [ -f "$WORK/data/logs/open-dots.log" ] && tail -40 "$WORK/data/logs/open-dots.log"; exit 1; }
+fail() {
+  local pid
+  log "FAILED: $*"
+  log "update status:"; cat "$DATA_DIR/update/status.json" 2>/dev/null || true
+  ls -la "$DATA_DIR/update" 2>/dev/null || true
+  log "log (without status polling):"
+  grep -v 'GET /api/v1/system/update' "$DATA_DIR/logs/open-dots.log" 2>/dev/null | tail -60 || true
+  pid=$(cat "$DATA_DIR/open-dots.pid" 2>/dev/null || true)
+  if [ -n "$pid" ]; then
+    log "start script $pid:"
+    ps -o pid,ppid,stat,command -p "$pid" 2>/dev/null || true
+    ps -o pid,sigignore,sigcatch -p "$pid" 2>/dev/null || grep -E 'Sig(Ign|Cgt)' "/proc/$pid/status" 2>/dev/null || true
+  fi
+  exit 1
+}
 
 cleanup() {
   local pid
