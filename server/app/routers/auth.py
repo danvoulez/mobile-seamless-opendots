@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.services.auth_service import auth_service, SESSION_COOKIE
+from app.config import settings
+from app.services.auth_service import SIGNIN_CODE_TTL_SECONDS, auth_service, SESSION_COOKIE
 
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -9,6 +10,10 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 class LoginRequest(BaseModel):
     token: str = Field(min_length=1, max_length=4096)
+
+
+class SignInRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=128)
 
 
 def _authentication_error() -> HTTPException:
@@ -51,6 +56,29 @@ async def establish_session(request: Request, response: Response):
 async def login(credentials: LoginRequest, request: Request, response: Response):
     if not auth_service.authenticate_token(credentials.token):
         raise _authentication_error()
+    auth_service.set_session_cookie(response, request.cookies.get(SESSION_COOKIE), secure=request.url.scheme == "https")
+    return _session_payload()
+
+
+@router.post("/signin-links")
+async def create_signin_link(request: Request):
+    """A link that opens the web client already signed in, once, for ten
+    minutes. The installer and ``start-mac.sh --sign-in`` use it (with the
+    owner token) so nobody has to copy the token by hand."""
+    if getattr(request.state, "client", {}).get("kind") != "owner":
+        raise HTTPException(status_code=403, detail="Only this computer can do that.")
+    code = auth_service.create_signin_code()
+    return {"url": f"{settings.WEB_URL}/?signin={code}", "expires_in": SIGNIN_CODE_TTL_SECONDS}
+
+
+@router.post("/signin")
+async def sign_in_with_code(body: SignInRequest, request: Request, response: Response):
+    if not auth_service.redeem_signin_code(body.code):
+        raise HTTPException(
+            status_code=401,
+            detail="This sign-in link has expired or was already used.",
+            headers={"Cache-Control": "no-store"},
+        )
     auth_service.set_session_cookie(response, request.cookies.get(SESSION_COOKIE), secure=request.url.scheme == "https")
     return _session_payload()
 

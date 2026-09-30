@@ -72,15 +72,38 @@ class AuthenticationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.client.cookies.set(SESSION_COOKIE, first_cookie)
         self.assertEqual((await self.client.get("/api/v1/auth/session")).status_code, 200)
 
-    async def test_session_expiry_is_enforced_on_server_and_restart_invalidates_sessions(self):
-        with patch("app.services.auth_service.monotonic", return_value=100):
-            await self.login()
+    async def test_session_expiry_is_enforced_on_server_and_survives_restart(self):
+        await self.login()
         cookie = self.client.cookies.get(SESSION_COOKIE)
-        with patch("app.services.auth_service.monotonic", return_value=101 + settings.AUTH_SESSION_MAX_AGE):
-            self.assertEqual((await self.client.get("/api/v1/bots")).status_code, 401)
+        # A restart (an update, for instance) keeps the browser signed in...
         with patch.dict(os.environ, {"APP_AUTH_TOKEN": self.service.token}):
             restarted = AuthService(Path(self.directory.name))
-        self.assertFalse(restarted.authenticate_session(cookie))
+        self.assertTrue(restarted.authenticate_session(cookie))
+        self.assertNotIn(cookie, (Path(self.directory.name) / ".auth-sessions.json").read_text())
+        # ...but never past the session's expiry, before or after one.
+        later = __import__("time").time() + settings.AUTH_SESSION_MAX_AGE + 1
+        with patch("app.services.auth_service.time", return_value=later):
+            self.assertEqual((await self.client.get("/api/v1/bots")).status_code, 401)
+            with patch.dict(os.environ, {"APP_AUTH_TOKEN": self.service.token}):
+                self.assertFalse(AuthService(Path(self.directory.name)).authenticate_session(cookie))
+
+    async def test_signin_link_opens_a_session_once(self):
+        # Only the owner can mint one.
+        self.assertEqual((await self.client.post("/api/v1/auth/signin-links")).status_code, 401)
+        minted = await self.client.post("/api/v1/auth/signin-links", headers={"Authorization": "Bearer " + self.service.token})
+        self.assertEqual(minted.status_code, 200)
+        url = minted.json()["url"]
+        self.assertTrue(url.startswith(settings.WEB_URL + "/?signin="))
+        code = url.split("signin=", 1)[1]
+
+        self.assertEqual((await self.client.post("/api/v1/auth/signin", json={"code": "not-a-code"})).status_code, 401)
+        signed_in = await self.client.post("/api/v1/auth/signin", json={"code": code})
+        self.assertEqual(signed_in.status_code, 200)
+        self.assertIn("HttpOnly", signed_in.headers["set-cookie"])
+        self.assertEqual((await self.client.get("/api/v1/bots")).status_code, 200)
+
+        self.client.cookies.clear()
+        self.assertEqual((await self.client.post("/api/v1/auth/signin", json={"code": code})).status_code, 401)
 
     async def test_bearer_credential_still_works_for_direct_clients(self):
         response = await self.client.get("/api/v1/bots", headers={"Authorization": "Bearer " + self.service.token})

@@ -30,40 +30,46 @@ Open Dots is independently built and is not affiliated with or endorsed by OpenA
 
 Open Dots gives developers and individuals a self-hosted AI workspace they can inspect and adapt. Use it as an open-source alternative to OpenAI Dots when you want local-first conversation storage, configurable model access, visible approval steps, and an optional computer runtime under your control. It is a separate project with its own implementation and current limitations; see the provider and runtime notes below before deploying it.
 
-## Quick start
-
-### Requirements
-
-- Node.js and npm
-- Python 3.10+ and pip
-- An inference API key and base URL for live model responses
-
-Clone and start the API:
+## Install on your Mac
 
 ```bash
-git clone https://github.com/Anil-matcha/open-dots.git
-cd open-dots/server
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-export MODEL_API_KEY="your_api_key"
-export MODEL_API_BASE_URL="https://your-inference-host.example/api/v1"
-python run.py
+curl -fsSL https://raw.githubusercontent.com/danvoulez/mobile-seamless-opendots/main/scripts/install.sh | bash
 ```
 
-The API is available at `http://127.0.0.1:8000`; interactive docs are at `/docs`.
+The installer checks for Python 3.11+, Node.js 20+ and git, and offers to install whatever is missing with Homebrew. It then downloads Open Dots to `~/.open-dots/app`, sets it up, keeps it running in the background (it starts again when you log in), and opens it in your browser already signed in. Add your model provider under **Settings → Model provider** and you're ready. Run the same line again to repair an install.
 
-In a second terminal, start the web client:
+Prefer to do it by hand? Clone the repository anywhere and run `./scripts/start-mac.sh`; the first run sets everything up.
+
+**Signing in.** On this Mac, `~/.open-dots/app/scripts/start-mac.sh --sign-in` opens Open Dots signed in (it makes a one-time link that works for 10 minutes). You can also paste the owner token from `~/.open-dots/.auth-token` into the sign-in form. The owner token is separate from your model provider key; never commit or share it. Browser sessions last 30 days, survive restarts and updates, and end when you sign out. Direct API clients can send the owner token as a Bearer credential.
+
+**Your data** lives in `~/.open-dots`: the database, encrypted settings, linked devices, the owner token, and database backups taken before each update. Settings that should survive updates, such as `PUBLIC_URL` for a tunnel, go in `~/.open-dots/open-dots.env` as `KEY=value` lines.
+
+### Updates
+
+Open Dots keeps itself up to date. Every few minutes it checks for a new tested version; when one is ready, the Mac shows an **Update** pill next to the new-chat button. One click installs it: Open Dots restarts for a few seconds (your iPhone shows *Reconnecting…* and picks up where it was), and both the Mac page and the iPhone app reload into the new version.
+
+With **Settings → Updates → Install updates automatically** on (the default), you don't even need the click: new versions install as soon as no reply is running. Before each update Open Dots backs up its database. If a new version doesn't start, it goes back to the previous one by itself, database included, tells you on the Mac, and skips that version until a newer one arrives.
+
+From a terminal: `./scripts/update.sh check` shows what's new, `./scripts/update.sh` updates now.
+
+### Uninstall
 
 ```bash
-cd open-dots/client
-npm install
-npm run dev
+~/.open-dots/app/scripts/uninstall.sh
 ```
 
-Open `http://127.0.0.1:3000` and sign in with the Open Dots owner token. On first start, the server creates `.auth-token` under `DATA_DIR` (default `~/.open-dots`). Read that file locally and paste its value into the sign-in form, or use the value of `APP_AUTH_TOKEN` if you configured one. This is a separate credential from your model provider API key, which you enter in App Settings after signing in. Never commit, share, or put the owner token in a public frontend environment variable.
+It stops Open Dots, removes it from your login items, and deletes the app. It asks before deleting your chats, settings and linked devices; keep them and a reinstall picks them up again. Afterwards, remove the Open Dots icon from your iPhone's Home Screen, and any Cloudflare Tunnel or Tailscale setup you made for it.
 
-Browser sessions use distinct HttpOnly cookies with server-enforced expiry. Sign out revokes the current session, and restarting the API invalidates all browser sessions. Direct API clients can continue to send the owner token as a Bearer credential. Loopback requests, including container gateway and reverse-proxy traffic, must authenticate too.
+### Develop
+
+For hot reload while you work on the code, run the API and the web client yourself:
+
+```bash
+cd server && python3 -m venv .venv && .venv/bin/pip install -r requirements.lock && .venv/bin/python run.py
+cd client && npm ci && npm run dev    # in a second terminal
+```
+
+The API is at `http://127.0.0.1:8000` (interactive docs at `/docs`); the web client at `http://127.0.0.1:3000`.
 
 ## Continue on iPhone
 
@@ -71,13 +77,13 @@ Open Dots runs on your Mac. Your iPhone picks up the same conversations: open a 
 
 ### Start Open Dots on your Mac
 
-You need Python 3.10+ and Node.js (`brew install python node`). From the project folder, run:
+The [installer](#install-on-your-mac) sets this up. By hand, from the project folder:
 
 ```bash
 ./scripts/start-mac.sh
 ```
 
-The first run creates the Python environment, installs and builds the web client, then opens `http://localhost:3000`. Sign in with the owner token (`cat ~/.open-dots/.auth-token`) and add your model provider under **Settings → Model provider**.
+The first run creates the Python environment, installs and builds the web client, then opens `http://localhost:3000` signed in. Add your model provider under **Settings → Model provider**.
 
 The script makes the API listen on your local network so the phone can reach it (the web client itself stays on the Mac), and it keeps the Mac from idle-sleeping while Open Dots runs. The display can still sleep; set `OPEN_DOTS_ALLOW_SLEEP=1` to allow system sleep too. If macOS asks whether Python may accept incoming connections, choose **Allow**.
 
@@ -208,12 +214,45 @@ iPhone ── JSON-RPC over one WebSocket (Wi-Fi or tunnel) ───┴── F
 
 The main code areas are `client/` (Next.js UI), `mobile/` (the iPhone app, served by the API at `/m/` with no build step), `server/app/routers/` (HTTP API), `server/app/services/` (providers, persistence, background turns, live events, device linking, approvals, and tools), and `runtime/` (Docker computer driver).
 
-Run the tests with `python -m unittest discover -s tests` in `server/` and `npm test` in `mobile/`.
+## How changes reach your Mac
+
+Open Dots is set up for one person shipping continuously: merge to `main`, and your Mac runs it minutes later, but only if every test passes.
+
+```text
+branch / pull request ──► CI: all tests ──► merge to main ──► CI again ──► stable ──► your Mac
+                                                               (all green)    (checks every few minutes,
+                                                                               installs when idle,
+                                                                               rolls back if it won't start)
+```
+
+[CI](.github/workflows/ci.yml) runs on every push and pull request:
+
+| Job | What it proves |
+| --- | --- |
+| Server (Python 3.11 and 3.13) | The API's unit tests |
+| iPhone app | Syntax and unit tests for `mobile/` |
+| Mac web client | Lint and a production build |
+| Shell scripts | `bash -n` and ShellCheck |
+| End to end | The iPhone app, the Mac web client, and the two together, in a real browser against a real server and a stand-in model: linking, live replies, joining a reply midway, approvals across devices, offline and reconnect ([`e2e/`](e2e/)). Screenshots are kept with each run. |
+| Install, update, roll back, uninstall (Linux and macOS) | The installer, a one-time sign-in link, an update from the API, a broken version rolled back with its database, an automatic update, and the uninstaller, against a throwaway git origin ([`e2e/update-flow.sh`](e2e/update-flow.sh)). The macOS run uses the system bash 3.2 and also installs the launchd login item. |
+
+When a commit on `main` passes all of them, CI moves the `stable` branch to it. Installed copies follow `stable` (set `UPDATE_CHANNEL` in `open-dots.env` to follow another branch). Dependabot opens grouped dependency updates monthly; they go through the same tests.
+
+Installs and updates use exact dependency versions: `client/package-lock.json` and `server/requirements.lock`. After changing `server/requirements.txt`, regenerate the lock as its header explains.
+
+Run the tests locally:
+
+```bash
+cd server && .venv/bin/python -m unittest discover -s tests   # API
+cd mobile && npm test                                           # iPhone app
+cd e2e && npm ci && ./run.sh                                    # browsers (needs a built client)
+e2e/update-flow.sh                                              # install → update → rollback → uninstall
+```
 
 ## Current limitations
 
 - One local owner; user provisioning, roles, and multi-user grants are not implemented.
-- SQLite is local state; coordinated multi-instance storage and backup workflows are not included.
+- SQLite is local state; the only backups are the five kept before updates, in `~/.open-dots/backups`.
 - Inference supports the original prediction API and Responses-compatible services; Chat Completions and a generic provider plugin interface are not implemented.
 - The computer runtime is opt-in and is not a hardened security boundary for arbitrary web content.
 - Connector actions are intentionally narrow; arbitrary tool discovery and writes are not implemented.

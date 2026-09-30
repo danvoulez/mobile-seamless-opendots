@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { FiSearch, FiPlus, FiSettings, FiActivity, FiLogOut, FiSmartphone, FiTrash2, FiUserPlus } from 'react-icons/fi';
 import MascotAvatar from './MascotAvatar';
+import UpdatePill from './UpdatePill';
 import { isDeviceOrigin } from '../lib/liveChat';
 
 function formatRowTime(value) {
@@ -35,6 +36,8 @@ export default function Sidebar({
   onOpenNewBot,
   onOpenContinuity,
   connection,
+  update,
+  onInstallUpdate,
 }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [isNewChatMenuOpen, setIsNewChatMenuOpen] = useState(false);
@@ -99,6 +102,8 @@ export default function Sidebar({
             <span className="w-3 h-3 rounded-full bg-[#28c840] block border border-[#1fa031]/40 cursor-pointer hover:opacity-80 transition" />
           </div>
 
+          <div className="flex items-center gap-2">
+          <UpdatePill update={update} onInstall={onInstallUpdate} onOpenSettings={onOpenSettings} />
           <div className="relative" ref={menuRef}>
             <button
               suppressHydrationWarning={true}
@@ -134,6 +139,7 @@ export default function Sidebar({
                 </button>
               </div>
             )}
+          </div>
           </div>
         </div>
 

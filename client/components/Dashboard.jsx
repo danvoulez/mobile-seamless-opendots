@@ -21,7 +21,11 @@ import {
   respondApproval,
   subscribeToEvents,
   createBot,
-  updateBot
+  updateBot,
+  fetchUpdateStatus,
+  checkForUpdate,
+  installUpdate,
+  setAutoUpdate,
 } from '../lib/api';
 import { applyChatEvent, emptyChat, mergeSnapshot, upsertMessage, upsertThread } from '../lib/liveChat';
 
@@ -37,6 +41,8 @@ export default function Dashboard({ onLogout }) {
   const [isContinuityOpen, setIsContinuityOpen] = useState(false);
   const [deviceEvent, setDeviceEvent] = useState(null);
   const [connection, setConnection] = useState('reconnecting');
+  const [update, setUpdate] = useState(null);
+  const versionRef = useRef(null); // the version this page was loaded with
   const [defaultModel, setDefaultModel] = useState('gpt-5-mini');
   const [userName, setUserName] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -100,6 +106,7 @@ export default function Dashboard({ onLogout }) {
     const latest = await fetchThreads();
     setThreads(latest);
     if (activeThreadRef.current) loadThread(activeThreadRef.current);
+    fetchUpdateStatus().then(setUpdate).catch(() => {});
   }, [loadThread]);
 
   // Initial Data Fetch
@@ -135,8 +142,19 @@ export default function Dashboard({ onLogout }) {
   useEffect(() => subscribeToEvents((event) => {
     switch (event.type) {
       case 'hello':
+        // Back from a restart on a new version: load the new web client.
+        if (event.version && versionRef.current && event.version !== versionRef.current) {
+          window.location.reload();
+          return;
+        }
+        versionRef.current = event.version || versionRef.current;
+        refresh();
+        return;
       case 'resync':
         refresh();
+        return;
+      case 'update.status':
+        setUpdate(event.update);
         return;
       case 'thread.created':
       case 'thread.updated':
@@ -219,6 +237,16 @@ export default function Dashboard({ onLogout }) {
     await respondApproval(requestId, action);
   };
 
+  const handleInstallUpdate = async () => {
+    setUpdate((prev) => prev && { ...prev, state: 'updating' });
+    try {
+      setUpdate(await installUpdate());
+    } catch (err) {
+      setUpdate(await fetchUpdateStatus().catch(() => null));
+      throw err;
+    }
+  };
+
   const handleDeleteThread = async (threadId) => {
     try {
       await deleteThread(threadId);
@@ -277,6 +305,8 @@ export default function Dashboard({ onLogout }) {
         onOpenNewBot={handleCreateNewBot}
         onOpenContinuity={() => setIsContinuityOpen(true)}
         connection={connection}
+        update={update}
+        onInstallUpdate={() => handleInstallUpdate().catch(() => setIsSettingsOpen(true))}
       />
 
       {/* Main Workspace Display Area */}
@@ -320,6 +350,10 @@ export default function Dashboard({ onLogout }) {
           setModels(await fetchModels());
         }}
         onProfileUpdate={(name) => setUserName(name || 'You')}
+        update={update}
+        onCheckUpdate={async () => setUpdate(await checkForUpdate())}
+        onInstallUpdate={handleInstallUpdate}
+        onSetAutoUpdate={async (auto) => setUpdate(await setAutoUpdate(auto))}
       />
 
       <ContinuityPanel

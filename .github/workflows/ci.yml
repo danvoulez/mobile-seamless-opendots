@@ -1,0 +1,184 @@
+# Every push and pull request runs the full test suite. When a commit on main
+# passes everything, it is published to the "stable" branch, which installed
+# copies of Open Dots follow: each Mac picks it up within minutes (by itself,
+# or with the Update button, per Settings → Updates).
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  PYTHON_VERSION: '3.13'
+
+jobs:
+  server:
+    name: Server (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: server/requirements.lock
+      - run: python -m pip install -r server/requirements.lock
+      - name: Unit tests
+        working-directory: server
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+  phone:
+    name: iPhone app
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Syntax
+        run: for file in mobile/*.js; do node --check "$file"; done
+      - name: Unit tests
+        working-directory: mobile
+        run: npm test
+
+  web:
+    name: Mac web client
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: client
+      - name: Lint
+        run: npx eslint --ext .js,.jsx app components lib
+        working-directory: client
+      - name: Build
+        run: npm run build
+        working-directory: client
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: for file in scripts/*.sh e2e/*.sh; do bash -n "$file"; done
+      - name: ShellCheck
+        run: shellcheck -x -P scripts -S warning scripts/*.sh e2e/*.sh
+
+  e2e:
+    name: End to end (iPhone and Mac in a browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: server/requirements.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            client/package-lock.json
+            e2e/package-lock.json
+      - name: Server environment
+        run: python -m venv server/.venv && server/.venv/bin/pip install -r server/requirements.lock
+      - name: Build the web client
+        working-directory: client
+        run: npm ci --no-audit --no-fund && npm run build
+      - name: Browser
+        working-directory: e2e
+        run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
+      - name: Run the suites
+        run: e2e/run.sh
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: e2e/shots/
+          if-no-files-found: ignore
+
+  update-flow:
+    name: Install, update, roll back, uninstall (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: e2e/update-flow.sh
+
+  macos:
+    name: Install, update, roll back, uninstall (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Use the bash that ships with macOS (3.2)
+        run: |
+          mkdir -p "$RUNNER_TEMP/system-bash"
+          ln -sf /bin/bash "$RUNNER_TEMP/system-bash/bash"
+          echo "$RUNNER_TEMP/system-bash" >> "$GITHUB_PATH"
+      - run: bash --version | head -1
+      - name: Install, update, roll back, uninstall
+        run: e2e/update-flow.sh
+      - name: Install with the login item (launchd), then uninstall
+        run: |
+          git branch -f ci-install HEAD
+          OPEN_DOTS_REPO="file://$GITHUB_WORKSPACE" UPDATE_CHANNEL=ci-install bash scripts/install.sh --yes --no-open
+          curl -fsS http://127.0.0.1:8000/api/v1/health
+          curl -fsS -o /dev/null http://127.0.0.1:3000
+          launchctl print "gui/$(id -u)/dev.opendots.open-dots" | head -20 || echo "(not running under launchd)"
+          bash "$HOME/.open-dots/app/scripts/uninstall.sh" --yes --delete-data
+          test ! -e "$HOME/.open-dots"
+          test ! -e "$HOME/Library/LaunchAgents/dev.opendots.open-dots.plist"
+          ! curl -fsS -m 3 http://127.0.0.1:8000/api/v1/health
+
+  publish:
+    name: Publish to stable
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [server, phone, web, scripts, e2e, update-flow, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Move stable to this commit
+        run: git push --force origin "HEAD:refs/heads/stable"

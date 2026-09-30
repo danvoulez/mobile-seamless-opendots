@@ -1311,6 +1311,7 @@ let socket = null;
 let retryTimer = 0;
 let retryDelay = 1000;
 let troubleTimer = 0;
+let loadedVersion = null; // the computer's version when this app loaded
 let lastEventAt = 0;
 let hiddenAt = 0;
 let nextCallId = 0;
@@ -1444,6 +1445,13 @@ function handleEvent(event) {
 
   switch (event.type) {
     case 'hello':
+      // The computer came back on a new version of Open Dots: load this app's
+      // new version too. Waiting messages are saved, so nothing is lost.
+      if (event.version && loadedVersion && event.version !== loadedVersion) {
+        location.reload();
+        return;
+      }
+      loadedVersion = event.version || loadedVersion;
       clearTimeout(troubleTimer);
       troubleTimer = 0;
       retryDelay = 1000;

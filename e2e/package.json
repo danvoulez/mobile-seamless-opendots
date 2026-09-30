@@ -1,0 +1,12 @@
+{
+  "name": "open-dots-e2e",
+  "private": true,
+  "description": "Browser end-to-end tests for Open Dots: the iPhone app, the Mac web client, and the two together.",
+  "type": "module",
+  "scripts": {
+    "test": "./run.sh"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

@@ -1,9 +1,10 @@
-# Dependencies
+# Dependencies (package-lock.json is committed: installs use exact versions)
 node_modules/
-package-lock.json
+node_modules.previous/
 
 # Next.js build output
 .next/
+.next.previous/
 out/
 
 # Environment files

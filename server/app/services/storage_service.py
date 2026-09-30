@@ -24,6 +24,7 @@ SETTING_KEYS = {
     "composio_key",
     "default_model",
     "theme",
+    "auto_update",
 }
 
 
@@ -88,6 +89,7 @@ class StorageService:
             "composio_api_key": settings.COMPOSIO_API_KEY,
             "default_model": settings.DEFAULT_MODEL,
             "theme": "dark",
+            "auto_update": True,
         }
 
     @staticmethod

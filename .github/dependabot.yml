@@ -1,0 +1,22 @@
+# Monthly, grouped dependency updates as pull requests. CI tests each one;
+# merging it ships it to your Mac like any other change.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /client
+    schedule:
+      interval: monthly
+    groups:
+      web-client:
+        patterns: ['*']
+  - package-ecosystem: npm
+    directory: /e2e
+    schedule:
+      interval: monthly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']

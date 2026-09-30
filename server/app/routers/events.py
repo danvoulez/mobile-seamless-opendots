@@ -9,6 +9,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.services.auth_service import auth_service
 from app.services.event_bus import event_bus
 from app.services.host_info import computer_name
+from app.services.update_service import update_service
 
 router = APIRouter(prefix="/api/v1", tags=["events"])
 
@@ -26,7 +27,8 @@ async def stream_events(request: Request):
             yield {
                 "event": "message",
                 "retry": 2000,
-                "data": json.dumps({"type": "hello", "computer": computer_name()}),
+                # "version" changes after an update: clients reload to match.
+                "data": json.dumps({"type": "hello", "computer": computer_name(), "version": update_service.version}),
             }
             while not await request.is_disconnected():
                 try:

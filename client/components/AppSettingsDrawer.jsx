@@ -3,12 +3,13 @@
 import React, { useState, useEffect } from "react";
 import { FiX, FiEye, FiEyeOff, FiPlus, FiTrash2, FiChevronDown } from "react-icons/fi";
 import { fetchSettings, saveSettings } from "../lib/api";
+import UpdatesCard from "./UpdatesCard";
 
 const inputClass = "w-full bg-[#222226] border border-[#36363d] rounded-lg px-3 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-violet-400";
 const cardClass = "bg-[#18181b] border border-[#27272a] rounded-2xl p-4 space-y-4";
 const buttonClass = "rounded-lg px-3 py-2 text-xs font-medium bg-violet-500 text-white hover:bg-violet-400 disabled:opacity-50 disabled:cursor-not-allowed";
 
-export default function AppSettingsDrawer({ models, isOpen, onClose, currentModel, onUpdateDefaultModel, onProfileUpdate }) {
+export default function AppSettingsDrawer({ models, isOpen, onClose, currentModel, onUpdateDefaultModel, onProfileUpdate, update, onCheckUpdate, onInstallUpdate, onSetAutoUpdate }) {
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -209,6 +210,8 @@ export default function AppSettingsDrawer({ models, isOpen, onClose, currentMode
           {notice && <p role={notice.error ? "alert" : "status"} className={`text-xs ${notice.error ? "text-red-400" : "text-emerald-400"}`}>{notice.text}</p>}
           </form>
         </details>
+
+        <UpdatesCard update={update} onCheck={onCheckUpdate} onInstall={onInstallUpdate} onSetAuto={onSetAutoUpdate} />
 
         <form onSubmit={saveConnector} className={cardClass}>
           <h3 className="text-sm font-semibold">App connectors</h3>

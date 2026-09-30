@@ -15,7 +15,7 @@ class Settings:
     ).expanduser().resolve()
     WORKSPACE_MAX_FILE_BYTES: int = int(os.getenv("WORKSPACE_MAX_FILE_BYTES", "131072"))
     APPROVAL_TIMEOUT_SECONDS: int = int(os.getenv("APPROVAL_TIMEOUT_SECONDS", "120"))
-    AUTH_SESSION_MAX_AGE: int = int(os.getenv("AUTH_SESSION_MAX_AGE", "86400"))
+    AUTH_SESSION_MAX_AGE: int = int(os.getenv("AUTH_SESSION_MAX_AGE", str(30 * 86400)))
     AUTH_COOKIE_SECURE: bool = os.getenv("AUTH_COOKIE_SECURE", "0").lower() in {"1", "true", "yes"}
     # ``fake`` is retained for deterministic tests. Real deployments should
     # select ``docker`` or ``remote`` explicitly.
@@ -73,6 +73,12 @@ class Settings:
     ).expanduser().resolve()
     DEVICE_SESSION_MAX_AGE: int = int(os.getenv("DEVICE_SESSION_MAX_AGE", str(400 * 86400)))
     PAIRING_CODE_TTL_SECONDS: int = int(os.getenv("PAIRING_CODE_TTL_SECONDS", "600"))
+    # The web client on this computer, for links that open it signed in.
+    WEB_URL: str = os.getenv("WEB_URL", "http://localhost:3000").strip().rstrip("/")
+    # Updates: this computer follows a branch that CI moves only to tested
+    # commits. Checks run while Open Dots is started by scripts/start-mac.sh.
+    UPDATE_CHANNEL: str = os.getenv("UPDATE_CHANNEL", "stable").strip() or "stable"
+    UPDATE_CHECK_MINUTES: float = float(os.getenv("UPDATE_CHECK_MINUTES", "5"))
 
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)

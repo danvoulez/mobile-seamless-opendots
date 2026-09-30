@@ -86,7 +86,8 @@ its `threadId`.
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `hello` | `protocol`, `computer`, `device` | First message on every connection: reload your state |
+| `hello` | `protocol`, `computer`, `device`, `version` | First message on every connection: reload your state. If `version` differs from the one you started with, the computer installed an update: reload the app |
+| `update.status` | `update` | The computer's update state; phones can ignore it |
 | `heartbeat` | – | Every 15 s when nothing else happens |
 | `resync` | – | Events were dropped: reload your state |
 | `thread.created`, `thread.updated` | `thread` | Summary with `status`: `idle`, `running`, `waiting` (needs approval) |

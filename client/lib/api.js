@@ -64,6 +64,19 @@ export async function login(token) {
   return session;
 }
 
+// A one-time link from the installer or `start-mac.sh --sign-in`.
+export async function signInWithCode(code) {
+  const response = await fetch(`${API_BASE_URL}/auth/signin`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }),
+  });
+  if (response.status === 401) throw new AuthenticationError('This sign-in link has expired or was already used.');
+  if (!response.ok) throw new Error('Sign-in failed. Check the API connection.');
+  const session = await response.json();
+  sessionPromise = Promise.resolve(session);
+  return session;
+}
+
 export async function logout() {
   const response = await fetch(`${API_BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' });
   if (!response.ok) throw new Error('Could not sign out. Reconnect to the API and retry.');
@@ -266,6 +279,35 @@ export async function respondApproval(requestId, action) {
   });
   if (!res.ok) throw new Error('Failed to respond approval');
   return res.json();
+}
+
+// ----- updates for this Mac's copy of Open Dots ---------------------------------
+
+async function updateRequest(path, options = {}) {
+  const res = await apiFetch(`${API_BASE_URL}/system/update${path}`, options);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || "Couldn't reach the update service.");
+  return body;
+}
+
+export function fetchUpdateStatus() {
+  return updateRequest('');
+}
+
+export function checkForUpdate() {
+  return updateRequest('/check', { method: 'POST' });
+}
+
+export function installUpdate() {
+  return updateRequest('', { method: 'POST' });
+}
+
+export function setAutoUpdate(auto) {
+  return updateRequest('', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ auto }),
+  });
 }
 
 export async function fetchSettings() {

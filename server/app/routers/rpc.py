@@ -25,6 +25,7 @@ from app.services.device_service import device_service
 from app.services.event_bus import event_bus
 from app.services.host_info import computer_name, device_label
 from app.services.request_guard import origin_is_trusted
+from app.services.update_service import update_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["rpc"])
@@ -158,6 +159,8 @@ class RpcConnection:
             "protocol": PROTOCOL_VERSION,
             "computer": computer_name(),
             "device": self.client.get("device"),
+            # Changes after the computer updates Open Dots: the phone reloads.
+            "version": update_service.version,
         }))
         forwarder = asyncio.create_task(self._forward_events(subscription))
         requests = set()

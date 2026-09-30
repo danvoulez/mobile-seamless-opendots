@@ -1,12 +1,15 @@
-# Dependencies
+# Dependencies (lockfiles are committed: installs and updates use exact versions)
 node_modules/
-package-lock.json
 client/node_modules/
-client/package-lock.json
 
-# Next.js build output
+# Next.js build output (and the previous build, kept to roll back an update)
 .next/
+.next.previous/
 client/.next/
+node_modules.previous/
+
+# End-to-end test output
+e2e/shots/
 
 # Python / Server cache & environments
 __pycache__/

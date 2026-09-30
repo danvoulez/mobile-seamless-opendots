@@ -1,4 +1,5 @@
 import re
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Request
@@ -7,18 +8,31 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers import auth, bots, models, chat, approvals, upload, settings as settings_router, connectors, audit, computers, threads, events, devices, rpc
+from app.routers import auth, bots, models, chat, approvals, upload, settings as settings_router, connectors, audit, computers, threads, events, devices, rpc, system
 from app.services.auth_service import auth_service
 from app.services.computer_provider import computer_provider
 from app.services.device_service import device_may_access, device_service, format_code, normalize_code
 from app.services.host_info import device_label, device_noun
 from app.services.request_guard import origin_is_trusted
 from app.services.storage_service import storage_service
+from app.services.update_service import update_service
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    checker = update_service.start()
+    try:
+        yield
+    finally:
+        if checker:
+            checker.cancel()
+
 
 app = FastAPI(
     title="Open Dots API",
     description="Open-source alternative to OpenAI Dots: self-hosted AI workspace API with a configurable inference adapter",
-    version="1.0.0"
+    version=update_service.version or "dev",
+    lifespan=lifespan,
 )
 
 PUBLIC_API_PATHS = {
@@ -26,6 +40,7 @@ PUBLIC_API_PATHS = {
     "/api/v1/auth/status",
     "/api/v1/auth/session",
     "/api/v1/auth/login",
+    "/api/v1/auth/signin",
     "/api/v1/auth/logout",
     "/api/v1/devices/pair",
 }
@@ -117,6 +132,7 @@ app.include_router(settings_router.router)
 app.include_router(connectors.router)
 app.include_router(audit.router)
 app.include_router(computers.router)
+app.include_router(system.router)
 
 
 @app.get("/api/v1/health")
