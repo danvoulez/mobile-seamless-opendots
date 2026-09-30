@@ -156,6 +156,21 @@ class UpdateServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.request()
             self.assertTrue(self.catcher.signalled())
 
+    async def test_a_failure_without_a_version_holds_automatic_updates_for_a_while(self):
+        self.repos.publish("New version")
+        status_file = self.root / "data" / "update" / "status.json"
+        status_file.parent.mkdir(parents=True)
+        with self.supervised():
+            service = self.service()
+            await service.check()
+            status_file.write_text(json.dumps({"state": "failed", "to": "", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
+            service._maybe_install()
+            self.assertEqual(service.state, "idle")
+            status_file.write_text(json.dumps({"state": "failed", "to": "", "at": "2020-01-01T00:00:00Z"}))
+            service._maybe_install()
+            self.assertEqual(service.state, "updating")
+            self.assertTrue(self.catcher.signalled())
+
     async def test_unreachable_origin_is_reported_not_raised(self):
         run_git(self.repos.install, "remote", "set-url", "origin", str(self.root / "missing.git"))
         status = await self.service().check()

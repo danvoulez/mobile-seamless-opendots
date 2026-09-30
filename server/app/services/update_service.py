@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MAX_CHANGES = 20
 TICK_SECONDS = 10
+# After an update fails before it knows which version it was installing (say,
+# offline), wait this long before trying again by itself.
+RETRY_AFTER_SECONDS = 30 * 60
 FIELD = "\x1f"
 
 
@@ -243,12 +246,25 @@ class UpdateService:
         except OSError:
             pass
 
+    def _auto_blocked(self, target: str) -> bool:
+        """Whether a recent failure means automatic updates should hold off."""
+        last = self.last_result() or {}
+        if last.get("state") not in {"failed", "rolled-back"}:
+            return False
+        if last.get("to"):
+            return last.get("to") == target  # a newer version gets its own try
+        try:
+            at = datetime.fromisoformat(str(last.get("at")).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return (datetime.now(timezone.utc) - at).total_seconds() < RETRY_AFTER_SECONDS
+
     def _maybe_install(self) -> None:
         if self.state == "updating" or self.turns.active or self.unavailable_reason():
             return
         if self.state == "waiting":
-            self._start()
-        elif self.available and self.auto and not self.available.get("failed_before"):
+            self._start()  # asked for by hand
+        elif self.available and self.auto and not self._auto_blocked(self.available["commit"]):
             self._start()
 
     async def run(self) -> None:

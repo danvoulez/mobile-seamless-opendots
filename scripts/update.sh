@@ -100,6 +100,22 @@ restore_version() {  # commit
   setup_server && setup_client
 }
 
+# The update in progress, for apply_guard.
+APPLY_FROM=""
+APPLY_TO=""
+
+# If apply stops unexpectedly, put the previous version back and record the
+# failure, so automatic updates don't retry it in a loop.
+apply_guard() {
+  local code=$?
+  [ "$code" -ne 0 ] || return 0
+  case "$(status_field state)" in failed|current|installed) return 0 ;; esac
+  if [ -n "$APPLY_FROM" ] && [ "$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" != "$APPLY_FROM" ]; then
+    restore_version "$APPLY_FROM" || true
+  fi
+  write_status "failed" "$APPLY_FROM" "$APPLY_TO" "The update stopped unexpectedly"
+}
+
 cmd_apply() {
   local from to short
   cd "$ROOT" || return 1
@@ -108,6 +124,7 @@ cmd_apply() {
     return 1
   fi
   from=$(git rev-parse HEAD)
+  APPLY_FROM="$from"
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     write_status "failed" "$from" "" "There are local changes in $ROOT"
     warn "Not updating: there are local changes in $ROOT."
@@ -123,8 +140,10 @@ cmd_apply() {
     say "Open Dots is up to date."
     return 0
   fi
+  APPLY_TO="$to"
   short=$(printf '%s' "$to" | cut -c1-7)
-  say "Updating Open Dots to $short…"
+  # Braces matter: macOS's bash 3.2 would read "…" as part of the name.
+  say "Updating Open Dots to ${short}…"
   write_status "updating" "$from" "$to" "Installing"
   mkdir -p "$UPDATE_DIR"
   schema_version "$DATABASE" > "$UPDATE_DIR/schema-before"
@@ -207,7 +226,7 @@ main() {
   case "${1:-now}" in
     now) cmd_now ;;
     check) cmd_check ;;
-    apply) cmd_apply ;;
+    apply) trap apply_guard EXIT; cmd_apply ;;
     confirm) cmd_confirm ;;
     rollback) cmd_rollback ;;
     -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;

@@ -87,6 +87,8 @@ jobs:
         run: for file in scripts/*.sh e2e/*.sh; do bash -n "$file"; done
       - name: ShellCheck
         run: shellcheck -x -P scripts -S warning scripts/*.sh e2e/*.sh
+      - name: No "$name…" (macOS's bash 3.2 reads non-ASCII as part of the name; write "${name}…")
+        run: '! grep -nP ''\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]'' scripts/*.sh e2e/*.sh'
 
   e2e:
     name: End to end (iPhone and Mac in a browser)
