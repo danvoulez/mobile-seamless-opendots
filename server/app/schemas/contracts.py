@@ -28,6 +28,36 @@ class Message(BaseModel):
     item_type: Optional[str] = "assistant_text"  # assistant_text, tool_call, approval_card
     image_url: Optional[str] = None
     raw_payload: Optional[Dict[str, Any]] = None
+    # The device a user message was sent from ("Mac", "iPhone", ...).
+    origin: Optional[str] = None
+    is_error: bool = False
+    client_id: Optional[str] = None
+
+
+class ThreadCreate(BaseModel):
+    bot_id: str = Field(min_length=1, max_length=128)
+    title: str = Field(default="", max_length=200)
+
+
+class ThreadUpdate(BaseModel):
+    title: str = Field(max_length=200)
+
+
+_IMAGE_URL = re.compile(r"^(https?://\S+|data:image/(png|jpeg|webp|gif|avif);base64,[A-Za-z0-9+/=]+)$")
+
+
+class ThreadMessageRequest(BaseModel):
+    text: str = Field(default="", max_length=100_000)
+    image_url: Optional[str] = Field(default=None, max_length=15_000_000)
+    model: Optional[str] = Field(default=None, max_length=200)
+    client_id: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("image_url")
+    @classmethod
+    def validate_image_url(cls, value):
+        if value and not _IMAGE_URL.match(value):
+            raise ValueError("Attach an http(s) image URL or a base64 image data URL.")
+        return value or None
 
 class TurnRequest(BaseModel):
     thread_id: str

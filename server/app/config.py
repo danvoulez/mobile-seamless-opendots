@@ -65,6 +65,14 @@ class Settings:
     ]
     HOST: str = os.getenv("HOST", "127.0.0.1")
     PORT: int = int(os.getenv("PORT", "8000"))
+    # Address linked phones use to reach this computer, e.g. a Tailscale
+    # HTTPS name. Detected from the local network when empty.
+    PUBLIC_URL: str = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+    MOBILE_DIR: Path = Path(
+        os.getenv("MOBILE_DIR", str(Path(__file__).resolve().parents[2] / "mobile"))
+    ).expanduser().resolve()
+    DEVICE_SESSION_MAX_AGE: int = int(os.getenv("DEVICE_SESSION_MAX_AGE", str(400 * 86400)))
+    PAIRING_CODE_TTL_SECONDS: int = int(os.getenv("PAIRING_CODE_TTL_SECONDS", "600"))
 
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)

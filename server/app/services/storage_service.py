@@ -31,6 +31,30 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def local_now() -> str:
+    """Local wall-clock time with its UTC offset, readable by every client."""
+    return datetime.now().astimezone().isoformat()
+
+
+def derive_title(text: str, limit: int = 60) -> str:
+    """Name a conversation after the first line of its first user message."""
+    first_line = next((line.strip() for line in str(text or "").splitlines() if line.strip()), "")
+    if len(first_line) <= limit:
+        return first_line
+    return first_line[: limit - 1].rstrip() + "…"
+
+
+def timestamp_key(value: Any) -> float:
+    """Sort key for stored timestamps; older records carry naive local times."""
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.timestamp()
+
+
 class StorageService:
     """SQLite-backed storage with a one-time import from the legacy JSON files."""
 
@@ -87,6 +111,7 @@ class StorageService:
             "settings",
             "approvals",
             "audit_events",
+            "threads",
         }:
             raise ValueError(f"Unsupported storage table: {table}")
         with self.database.connect() as connection:
@@ -249,6 +274,107 @@ class StorageService:
 
         if self._count("settings") == 0:
             self.save_settings(self._default_settings())
+
+        self._backfill_threads()
+
+    def _backfill_threads(self) -> None:
+        """Give conversations stored before threads existed a thread record.
+
+        Earlier versions kept exactly one conversation per assistant and used
+        the bot id as the thread id, so those threads keep that id.
+        """
+        with self.database.connect() as connection:
+            known = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT id FROM threads WHERE owner_id = ?", (self.owner_id,)
+                )
+            }
+            rows = connection.execute(
+                "SELECT thread_id, payload FROM messages WHERE owner_id = ? ORDER BY rowid",
+                (self.owner_id,),
+            ).fetchall()
+
+        found: Dict[str, Dict[str, Any]] = {}
+        for thread_id, payload in rows:
+            message = self._decode_payload(payload)
+            if not thread_id or thread_id in known or not isinstance(message, dict):
+                continue
+            created_at = message.get("created_at") or local_now()
+            thread = found.setdefault(thread_id, {
+                "id": thread_id,
+                "bot_id": message.get("bot_id") or thread_id,
+                "title": "",
+                "created_at": created_at,
+            })
+            thread["updated_at"] = created_at
+            if not thread["title"] and message.get("sender") == "user":
+                thread["title"] = derive_title(message.get("text", ""))
+
+        for thread in found.values():
+            self.save_thread(thread)
+
+    def get_threads(self) -> List[Dict[str, Any]]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM threads WHERE owner_id = ?", (self.owner_id,)
+            ).fetchall()
+        threads = [payload for row in rows if isinstance((payload := self._decode_payload(row[0])), dict)]
+        return sorted(threads, key=lambda thread: timestamp_key(thread.get("updated_at")), reverse=True)
+
+    def get_thread(self, thread_id: str) -> Optional[Dict[str, Any]]:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM threads WHERE owner_id = ? AND id = ?",
+                (self.owner_id, thread_id),
+            ).fetchone()
+        payload = self._decode_payload(row[0]) if row else None
+        return payload if isinstance(payload, dict) else None
+
+    def save_thread(self, thread: Dict[str, Any]) -> None:
+        if not isinstance(thread, dict) or not thread.get("id"):
+            return
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO threads(id, bot_id, owner_id, payload) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET bot_id = excluded.bot_id, "
+                "owner_id = excluded.owner_id, payload = excluded.payload",
+                (str(thread["id"]), thread.get("bot_id"), self.owner_id, json.dumps(thread)),
+            )
+
+    def delete_thread(self, thread_id: str) -> bool:
+        with self.database.connect() as connection:
+            deleted = connection.execute(
+                "DELETE FROM threads WHERE owner_id = ? AND id = ?", (self.owner_id, thread_id)
+            ).rowcount
+            connection.execute(
+                "DELETE FROM messages WHERE owner_id = ? AND thread_id = ?", (self.owner_id, thread_id)
+            )
+        return bool(deleted)
+
+    def get_last_message(self, thread_id: str) -> Optional[Dict[str, Any]]:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM messages WHERE owner_id = ? AND thread_id = ? ORDER BY rowid DESC LIMIT 1",
+                (self.owner_id, thread_id),
+            ).fetchone()
+        payload = self._decode_payload(row[0]) if row else None
+        return payload if isinstance(payload, dict) else None
+
+    def get_last_messages(self) -> Dict[str, Dict[str, Any]]:
+        """Return the newest message of every thread, keyed by thread id."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT m.thread_id, m.payload FROM messages m "
+                "JOIN (SELECT MAX(rowid) AS last_row FROM messages WHERE owner_id = ? GROUP BY thread_id) latest "
+                "ON m.rowid = latest.last_row",
+                (self.owner_id,),
+            ).fetchall()
+        return {
+            row[0]: payload
+            for row in rows
+            if isinstance((payload := self._decode_payload(row[1])), dict)
+        }
 
     def get_bots(self) -> List[Dict[str, Any]]:
         with self.database.connect() as connection:

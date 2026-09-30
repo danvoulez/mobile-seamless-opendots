@@ -73,6 +73,15 @@ SCHEMA_MIGRATIONS = {
         INSERT OR IGNORE INTO users(id, username, role, created_at)
         VALUES ('local-user', 'local', 'owner', datetime('now'));
     """,
+    3: """
+        CREATE TABLE IF NOT EXISTS devices (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL DEFAULT 'local-user',
+            token_hash TEXT NOT NULL UNIQUE,
+            payload TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_threads_bot ON threads(bot_id);
+    """,
 }
 
 OWNER_TABLES = (

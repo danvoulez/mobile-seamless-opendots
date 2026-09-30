@@ -11,6 +11,8 @@ from app.services.storage_service import StorageService
 from app.schemas.contracts import AppSettingsSchema
 from app.routers import settings as settings_router
 from app.routers import chat as chat_router
+from app.services.event_bus import EventBus
+from app.services.turn_service import TurnService
 from app.main import app
 from app.services.auth_service import auth_service
 
@@ -132,9 +134,14 @@ class ChatStreamTests(unittest.IsolatedAsyncioTestCase):
                 storage = Mock()
                 storage.get_messages.return_value = [{"sender": "user", "text": "Hello"}]
                 storage.get_bots.return_value = [{"id": "chat-test", "model": "exact.model-id", "system_prompt": "Test persona"}]
+                storage.get_thread.return_value = None
+                provider = Mock(stream_chat_completion=fake_stream)
+                bus = EventBus()
+                turns = TurnService(storage=storage, bus=bus, provider=provider)
                 transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
                 with patch.object(chat_router, "storage_service", storage), \
-                     patch.object(chat_router.provider_service, "stream_chat_completion", fake_stream):
+                     patch.object(chat_router, "event_bus", bus), \
+                     patch.object(chat_router, "turn_service", turns):
                     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
                         await client.post("/api/v1/auth/login", json={"token": auth_service.token})
                         response = await client.get("/api/v1/chat/stream/chat-test")
@@ -145,7 +152,7 @@ class ChatStreamTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(events[-1]["type"], "turn.completed")
                 self.assertEqual(events[-1]["ok"], ok)
                 self.assertEqual(events[0]["model"], "exact.model-id")
-                if ok:
-                    storage.add_message.assert_called_once()
-                else:
-                    storage.add_message.assert_not_called()
+                # Failed replies are kept as error messages so every device
+                # shows the same conversation; they stay out of model context.
+                storage.add_message.assert_called_once()
+                self.assertEqual(storage.add_message.call_args.args[0]["is_error"], not ok)
