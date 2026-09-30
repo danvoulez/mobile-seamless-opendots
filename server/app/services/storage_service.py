@@ -352,6 +352,17 @@ class StorageService:
             )
         return bool(deleted)
 
+    def find_message_by_client_id(self, client_id: str) -> Optional[Dict[str, Any]]:
+        """A message by the id its sender chose, used to make sends retry-safe."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM messages WHERE owner_id = ? "
+                "AND json_extract(payload, '$.client_id') = ? LIMIT 1",
+                (self.owner_id, client_id),
+            ).fetchone()
+        payload = self._decode_payload(row[0]) if row else None
+        return payload if isinstance(payload, dict) else None
+
     def get_last_message(self, thread_id: str) -> Optional[Dict[str, Any]]:
         with self.database.connect() as connection:
             row = connection.execute(

@@ -13,6 +13,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Settings that should survive restarts, such as PUBLIC_URL for a Cloudflare
+# Tunnel, go in ~/.open-dots/open-dots.env as KEY=value lines.
+CONFIG="${DATA_DIR:-$HOME/.open-dots}/open-dots.env"
+if [ -f "$CONFIG" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$CONFIG"
+  set +a
+fi
+
 LABEL="dev.opendots.open-dots"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 API_PORT=8000   # the web client expects the API here

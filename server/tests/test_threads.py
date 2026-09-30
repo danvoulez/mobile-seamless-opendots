@@ -10,6 +10,7 @@ import httpx
 from app.main import app
 from app.routers import threads as threads_router
 from app.services.auth_service import auth_service
+from app.services.conversation_service import ConversationService
 from app.services.event_bus import EventBus
 from app.services.storage_service import StorageService
 from app.services.turn_service import TurnService
@@ -41,9 +42,7 @@ class ThreadApiTests(unittest.IsolatedAsyncioTestCase):
         self.provider = ScriptedProvider()
         self.turns = TurnService(storage=self.storage, bus=self.bus, provider=self.provider)
         self.patches = [
-            patch.object(threads_router, "storage_service", self.storage),
-            patch.object(threads_router, "event_bus", self.bus),
-            patch.object(threads_router, "turn_service", self.turns),
+            patch.object(threads_router, "conversations", ConversationService(self.storage, self.bus, self.turns)),
         ]
         for item in self.patches:
             item.start()
@@ -172,6 +171,19 @@ class ThreadApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool.denied", [e["type"] for e in events])
         snapshot = (await self.client.get(f"/api/v1/threads/{thread['id']}")).json()["turn"]
         self.assertEqual(snapshot["approvals"][0]["status"], "deny")
+
+    async def test_repeated_send_with_same_client_id_posts_once(self):
+        thread = await self.new_thread()
+        body = {"text": "Only once, please", "client_id": "c-retry-1"}
+        first = await self.client.post(f"/api/v1/threads/{thread['id']}/messages", json=body)
+        await self.turns.wait(thread["id"])
+        again = await self.client.post(f"/api/v1/threads/{thread['id']}/messages", json=body)
+        self.assertEqual(again.status_code, 202)
+        self.assertTrue(again.json()["duplicate"])
+        self.assertEqual(again.json()["message"]["id"], first.json()["message"]["id"])
+        users = [m for m in self.storage.get_messages(thread_id=thread["id"]) if m["sender"] == "user"]
+        self.assertEqual(len(users), 1)
+        self.assertEqual(len(self.provider.calls), 1)
 
     async def test_validation_rename_and_delete(self):
         self.assertEqual((await self.client.post("/api/v1/threads", json={"bot_id": "missing"})).status_code, 404)

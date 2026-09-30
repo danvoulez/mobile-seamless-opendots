@@ -97,23 +97,45 @@ The code works once and expires after 10 minutes. You can also type the address 
 - **Replies:** a reply runs on the Mac, not in the browser. Locking the phone or closing the tab doesn't stop it. Open the chat on either device, even mid-reply, and it catches up.
 - **Approvals:** a request for approval appears on every open device and can be answered on any of them.
 - **Staying connected:** the phone keeps its connection to the Mac on its own. It reconnects after the phone wakes or changes networks, notices a connection that died silently, and never asks you to retry. If the Mac sleeps or leaves the network, your chats stay on screen, and anything you write, including a new chat, waits on the phone and is sent as soon as the Mac is back.
-- **Opening the app while the Mac is away:** the app itself is served by the Mac, so this only works over HTTPS (see Tailscale below), where the phone keeps a copy of the app. Over plain local-network HTTP, iOS shows a connection error until the Mac is back.
+- **Opening the app while the Mac is away:** the app itself is served by the Mac, so this only works over HTTPS (see Cloudflare Tunnel or Tailscale below), where the phone keeps a copy of the app. Over plain local-network HTTP, iOS shows a connection error until the Mac is back.
 
 ### Linked devices
 
 Linking gives the iPhone its own long-lived credential, stored only as a hash on the Mac. A linked phone can read and continue conversations, start new ones, attach images, and answer approvals. It cannot change settings or keys, manage assistants, use the computer or connector panels, delete conversations, or link other devices. Unlink a phone from the **Continue on iPhone** panel on the Mac, or from the phone's own settings sheet; it stops working immediately.
 
-### Network and encryption
+### How the iPhone connects
 
-On your own Wi-Fi the phone reaches the Mac over plain HTTP at its Bonjour name (`your-mac.local:8000`), like other local-network apps, so anyone on the same network could read that traffic. Use a network you trust.
+The iPhone keeps one WebSocket open to the Mac and speaks JSON-RPC over it: its requests (open a chat, send, approve) and the Mac's live events (new messages, replies as they stream) share that connection. The protocol is described in [docs/iphone-protocol.md](docs/iphone-protocol.md), so a native iPhone app can use it as is.
 
-To reach your Mac from anywhere with encryption, put both devices on [Tailscale](https://tailscale.com/kb/1242/tailscale-serve) and let it serve Open Dots over HTTPS. For example, run `tailscale serve --bg 8000`, then start Open Dots with the resulting address:
+Settings that should survive restarts go in `~/.open-dots/open-dots.env`, one `KEY=value` per line; the start script and the background login item both read it.
 
-```bash
-HOST=127.0.0.1 PUBLIC_URL=https://your-mac.your-tailnet.ts.net ./scripts/start-mac.sh
-```
+#### On your Wi-Fi
 
-With `HOST=127.0.0.1` the API is only reachable through Tailscale. Your conversations still live on the Mac; Tailscale only connects the two devices.
+The phone reaches the Mac at its Bonjour name (`your-mac.local:8000`) over plain HTTP, like other local-network apps, so anyone on the same network could read that traffic. Use a network you trust.
+
+#### From anywhere: Cloudflare Tunnel
+
+A [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) gives your Mac a stable HTTPS address, such as `dots.example.com`, without opening ports on your router. You need a Cloudflare account and a domain on Cloudflare.
+
+1. In the Cloudflare dashboard, create a tunnel and give it a public hostname, for example `dots.example.com`, that points to `http://localhost:8000`.
+2. On the Mac, run `brew install cloudflared`, then the macOS install command the dashboard shows. The tunnel then starts with the Mac.
+3. Give Open Dots that address, and keep it off the local network:
+
+   ```bash
+   mkdir -p ~/.open-dots
+   printf 'PUBLIC_URL=https://dots.example.com\nHOST=127.0.0.1\n' >> ~/.open-dots/open-dots.env
+   ```
+
+4. Restart Open Dots and link the iPhone again from **Continue on iPhone**; the code now points to the tunnel address. The phone reaches the Mac at home and away, and because the address is HTTPS, the app also opens while the Mac is away.
+
+Before you rely on it:
+
+- **Cloudflare can read this traffic.** The HTTPS connection ends at Cloudflare's servers, which pass it on to your Mac, so Cloudflare could see your messages in transit. Conversations are still stored and processed only on your Mac. End-to-end encryption on top of the tunnel is not implemented; if you need it today, use Tailscale.
+- **The address is public.** Only linked devices and the owner token get in, and every linking code works once, for 10 minutes. Unlink a lost phone from the Mac. You can add Cloudflare Access for an extra sign-in, but the phone then has to pass it too.
+
+#### From anywhere, encrypted end to end: Tailscale
+
+Put both devices on [Tailscale](https://tailscale.com/kb/1242/tailscale-serve) and let it serve Open Dots over HTTPS, for example with `tailscale serve --bg 8000`. Then set `PUBLIC_URL` to the address it shows (such as `https://your-mac.your-tailnet.ts.net`) and `HOST=127.0.0.1` in `~/.open-dots/open-dots.env`. Traffic is encrypted between your own devices, and only devices on your tailnet can reach the Mac.
 
 ## Model provider
 
@@ -140,7 +162,7 @@ Set `model_ids` to the service's supported chat model IDs and `default_model` to
 | `WORKSPACE_ROOT` | project root | Directory boundary for approved workspace actions |
 | `COMPUTER_PROVIDER` | `fake` | Computer provider: `fake`, `docker`, or `remote` |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | API bind address (`scripts/start-mac.sh` uses `0.0.0.0` so a linked iPhone can connect) |
-| `PUBLIC_URL` | detected | Address linked phones use to reach this computer, e.g. a Tailscale HTTPS name; defaults to the Bonjour name or LAN address |
+| `PUBLIC_URL` | detected | Address linked phones use to reach this computer, e.g. a Cloudflare Tunnel or Tailscale HTTPS name; defaults to the Bonjour name or LAN address |
 | `PAIRING_CODE_TTL_SECONDS` | `600` | How long a Continue on iPhone code stays valid |
 | `DEVICE_SESSION_MAX_AGE` | 400 days | Lifetime of a linked device's cookie; unlinking revokes it at once |
 
@@ -173,15 +195,15 @@ For a remote computer service, configure `COMPUTER_PROVIDER=remote` and the `COM
 ## Architecture
 
 ```text
-Next.js client (Mac) ──┐
-                        ├── HTTP + live events (SSE) ── FastAPI API
-iPhone app (/m/) ──────┘                                 ├── conversations + background turns
-                                                          ├── SQLite + encrypted settings
-                                  ├── configurable inference adapter
-                                  ├── Composio connector adapter
-                                  └── action gateway + approvals + audit
-                                        ├── confined workspace tools
-                                        └── fake / Docker / remote computer
+Mac browser (Next.js) ── HTTP + live events (SSE) ─────────┐
+iPhone ── JSON-RPC over one WebSocket (Wi-Fi or tunnel) ───┴── FastAPI API
+                                                                ├── conversations + background turns
+                                                                ├── SQLite + encrypted settings
+                                                                ├── configurable inference adapter
+                                                                ├── Composio connector adapter
+                                                                └── action gateway + approvals + audit
+                                                                      ├── confined workspace tools
+                                                                      └── fake / Docker / remote computer
 ```
 
 The main code areas are `client/` (Next.js UI), `mobile/` (the iPhone app, served by the API at `/m/` with no build step), `server/app/routers/` (HTTP API), `server/app/services/` (providers, persistence, background turns, live events, device linking, approvals, and tools), and `runtime/` (Docker computer driver).

@@ -11,6 +11,7 @@ from app.routers import threads as threads_router
 from app.services import device_service as device_module
 from app.services.auth_service import auth_service
 from app.services.device_service import DEVICE_COOKIE, DeviceService, PairingError
+from app.services.conversation_service import ConversationService
 from app.services.event_bus import EventBus
 from app.services.storage_service import StorageService
 from app.services.turn_service import TurnService
@@ -26,12 +27,10 @@ class DeviceLinkingTests(unittest.IsolatedAsyncioTestCase):
         self.bus = EventBus()
         self.turns = TurnService(storage=self.storage, bus=self.bus)
         self.patches = [
+            patch.object(threads_router, "conversations", ConversationService(self.storage, self.bus, self.turns)),
             patch("app.main.device_service", self.devices),
             patch.object(devices_router, "device_service", self.devices),
             patch.object(devices_router, "event_bus", self.bus),
-            patch.object(threads_router, "storage_service", self.storage),
-            patch.object(threads_router, "turn_service", self.turns),
-            patch.object(threads_router, "event_bus", self.bus),
         ]
         for item in self.patches:
             item.start()

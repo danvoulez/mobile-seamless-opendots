@@ -82,6 +82,10 @@ SCHEMA_MIGRATIONS = {
         );
         CREATE INDEX IF NOT EXISTS idx_threads_bot ON threads(bot_id);
     """,
+    4: """
+        CREATE INDEX IF NOT EXISTS idx_messages_client
+        ON messages(json_extract(payload, '$.client_id'));
+    """,
 }
 
 OWNER_TABLES = (

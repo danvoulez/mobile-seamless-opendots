@@ -1,3 +1,4 @@
+import re
 from typing import Optional
 
 from fastapi import FastAPI, Request
@@ -6,11 +7,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers import auth, bots, models, chat, approvals, upload, settings as settings_router, connectors, audit, computers, threads, events, devices
+from app.routers import auth, bots, models, chat, approvals, upload, settings as settings_router, connectors, audit, computers, threads, events, devices, rpc
 from app.services.auth_service import auth_service
 from app.services.computer_provider import computer_provider
 from app.services.device_service import device_may_access, device_service, format_code, normalize_code
 from app.services.host_info import device_label, device_noun
+from app.services.request_guard import origin_is_trusted
 from app.services.storage_service import storage_service
 
 app = FastAPI(
@@ -31,29 +33,33 @@ PUBLIC_API_PATHS = {
 # The phone app renders model output; keep it to its own scripts and styles.
 MOBILE_HEADERS = {
     "Cache-Control": "no-cache",
-    "Content-Security-Policy": (
-        "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self'; "
-        "script-src 'self'; connect-src 'self'; font-src 'self'; manifest-src 'self'; "
-        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
-    ),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
 }
 
 
+HOST_PATTERN = re.compile(r"[A-Za-z0-9.-]+(:[0-9]{1,5})?|\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?")
+
+
+def mobile_csp(request: Request) -> str:
+    # Name this host's WebSocket origin: older Safari doesn't count ws(s): as 'self'.
+    host = request.headers.get("host", "")
+    sockets = f" ws://{host} wss://{host}" if HOST_PATTERN.fullmatch(host) else ""
+    if settings.PUBLIC_URL.startswith("https://"):
+        sockets += f" wss://{settings.PUBLIC_URL[len('https://'):]}"
+    return (
+        "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self'; "
+        f"script-src 'self'; connect-src 'self'{sockets}; font-src 'self'; "
+        "manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    )
+
+
 @app.middleware("http")
 async def require_authentication(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/api/v1") and request.method != "OPTIONS":
-        origin = request.headers.get("origin")
-        allowed_origins = {*settings.CORS_ORIGINS, str(request.base_url).rstrip("/")}
-        if settings.PUBLIC_URL:
-            allowed_origins.add(settings.PUBLIC_URL)
-        # CORS alone does not stop credentialed requests from changing state.
-        if (origin and origin not in allowed_origins) or (
-            not origin and request.headers.get("sec-fetch-site") in {"cross-site", "same-site"}
-        ):
-            return JSONResponse({"detail": "Untrusted request origin."}, status_code=403)
+    # CORS alone does not stop credentialed requests from changing state.
+    if path.startswith("/api/v1") and request.method != "OPTIONS" and not origin_is_trusted(request):
+        return JSONResponse({"detail": "Untrusted request origin."}, status_code=403)
     if (
         request.method == "OPTIONS"
         or not path.startswith("/api/v1")
@@ -64,6 +70,7 @@ async def require_authentication(request: Request, call_next):
             response.headers["Cache-Control"] = "no-store"
         if path == "/m" or path.startswith("/m/"):
             response.headers.update(MOBILE_HEADERS)
+            response.headers["Content-Security-Policy"] = mobile_csp(request)
         return response
 
     user = auth_service.authenticate_request(request)
@@ -102,6 +109,7 @@ app.include_router(models.router)
 app.include_router(chat.router)
 app.include_router(threads.router)
 app.include_router(events.router)
+app.include_router(rpc.router)
 app.include_router(devices.router)
 app.include_router(upload.router)
 app.include_router(approvals.router)

@@ -298,8 +298,8 @@ function threadBusy(threadId) {
   return status === 'running' || status === 'waiting';
 }
 
-async function createThreadFor(item) {
-  const thread = await api('/threads', { method: 'POST', body: { bot_id: item.botId } });
+// A chat started on the phone gets its real id from the Mac's first reply.
+function adoptThread(item, thread) {
   for (const other of outbox) {
     if (other.localId === item.localId) other.threadId = thread.id;
   }
@@ -321,17 +321,22 @@ async function flush() {
       item.status = 'sending';
       schedule(renderMessages);
       try {
-        if (!item.threadId) await createThreadFor(item);
-        const result = await api(`/threads/${encodeURIComponent(item.threadId)}/messages`, {
-          method: 'POST',
-          body: { text: item.text, image_url: item.imageUrl || null, client_id: item.clientId },
+        // Safe to repeat: the Mac recognizes the message by its client id.
+        const result = await rpc('messages.send', {
+          thread_id: item.threadId || null,
+          bot_id: item.threadId ? null : item.botId,
+          text: item.text,
+          image_url: item.imageUrl || null,
+          client_id: item.clientId,
         });
+        if (!item.threadId) adoptThread(item, result.thread);
         outbox = outbox.filter((other) => other !== item);
         saveOutbox();
         const chat = state.chat;
-        if (chat?.threadId === item.threadId) {
+        if (chat?.threadId === result.thread.id) {
           upsertMessage(result.message);
-          if (!chat.turn || chat.turn.botMsgId !== result.turn.botMsgId) chat.turn = result.turn;
+          if (result.duplicate) loadChat(chat.threadId);
+          else if (!chat.turn || chat.turn.botMsgId !== result.turn.botMsgId) chat.turn = result.turn;
           schedule(renderChatHeader);
         }
       } catch (error) {
@@ -478,8 +483,7 @@ async function link(code) {
 }
 
 function unlinked() {
-  source?.close();
-  source = null;
+  disconnect();
   storage.remove('od:cache');
   storage.remove('od:outbox');
   outbox = [];
@@ -685,7 +689,7 @@ function openDraft(botId) {
 
 async function loadChat(threadId) {
   try {
-    const detail = await api(`/threads/${encodeURIComponent(threadId)}`);
+    const detail = await rpc('threads.get', { thread_id: threadId });
     if (state.chat?.threadId === threadId) applySnapshot(detail);
   } catch (error) {
     if (state.chat?.threadId !== threadId) return;
@@ -1098,7 +1102,7 @@ async function respond(requestId, action) {
   state.approvalsBusy.add(requestId);
   schedule(renderMessages);
   try {
-    await api('/approvals/respond', { method: 'POST', body: { request_id: requestId, action } });
+    await rpc('approvals.respond', { request_id: requestId, action });
   } catch (error) {
     if (error.status === 404) toast('Already answered.');
     else if (error.status !== 401) toast(error.message);
@@ -1140,7 +1144,7 @@ async function openNewChat() {
       h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: closeSheet }, icon('x'))),
     list);
   try {
-    state.bots = await api('/bots');
+    state.bots = await rpc('bots.list');
     list.replaceChildren(...rows());
   } catch { /* the saved list is shown */ }
 }
@@ -1208,19 +1212,27 @@ function enableSwipeBack() {
 
 // ------------------------------------------------------ staying connected
 
+// One WebSocket to the Mac carries everything: requests (JSON-RPC 2.0) and
+// live events (notifications). It works the same on the local network and
+// through a tunnel such as Cloudflare Tunnel.
+//
 // Being connected is the normal state, and the app works to stay there: it
 // reconnects on its own, notices a connection that died silently, and
 // reconnects as soon as the phone wakes up or changes network.
 const RETRY_MAX = 5000;
 const SILENCE_LIMIT = 40000; // the Mac sends a heartbeat every 15 s
 const TROUBLE_GRACE = 3000; // don't flash "Reconnecting…" for a blip
+const CALL_TIMEOUT = 20000;
+const CLOSE_NOT_LINKED = 4401;
 
-let source = null;
+let socket = null;
 let retryTimer = 0;
 let retryDelay = 1000;
 let troubleTimer = 0;
 let lastEventAt = 0;
 let hiddenAt = 0;
+let nextCallId = 0;
+const calls = new Map(); // request id -> { resolve, reject, timer }
 
 function setConnection(value) {
   if (state.connection === value) return;
@@ -1236,28 +1248,80 @@ function markTrouble() {
   }, TROUBLE_GRACE);
 }
 
-function connect() {
+function unreachable() {
+  return new ApiError(`Can't reach ${state.computer}.`, 0);
+}
+
+// Calls in flight when the connection drops fail as "unreachable"; the
+// outbox keeps what was being sent and tries again after reconnecting.
+function failCalls() {
+  for (const call of calls.values()) {
+    clearTimeout(call.timer);
+    call.reject(unreachable());
+  }
+  calls.clear();
+}
+
+function rpc(method, params = {}) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(unreachable());
+  nextCallId += 1;
+  const id = nextCallId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      calls.delete(id);
+      reject(unreachable());
+    }, CALL_TIMEOUT);
+    calls.set(id, { resolve, reject, timer });
+    socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+  });
+}
+
+function receive(item) {
+  if (item.method === 'event') {
+    handleEvent(item.params);
+    return;
+  }
+  const call = calls.get(item.id);
+  if (!call) return;
+  calls.delete(item.id);
+  clearTimeout(call.timer);
+  if (item.error) call.reject(new ApiError(item.error.message, item.error.data?.status || 500));
+  else call.resolve(item.result);
+}
+
+function disconnect() {
   clearTimeout(retryTimer);
   retryTimer = 0;
-  source?.close();
+  const previous = socket;
+  socket = null;
+  if (previous) {
+    previous.onclose = null;
+    previous.close();
+  }
+  failCalls();
+}
+
+function connect() {
+  disconnect();
   lastEventAt = Date.now();
-  source = new EventSource('/api/v1/events');
-  source.onmessage = (message) => {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/v1/rpc`);
+  socket = ws;
+  ws.onmessage = (message) => {
+    if (socket !== ws) return;
     lastEventAt = Date.now();
-    let event;
-    try { event = JSON.parse(message.data); } catch { return; }
-    handleEvent(event);
+    let data;
+    try { data = JSON.parse(message.data); } catch { return; }
+    (Array.isArray(data) ? data : [data]).forEach(receive);
   };
-  source.onerror = async () => {
-    markTrouble();
-    if (source?.readyState !== EventSource.CLOSED) return; // the browser retries every 2 s
-    source = null;
-    // A refused stream is a network problem or a revoked link; tell them apart.
-    try {
-      await api('/devices/current');
-    } catch (error) {
-      if (error.status === 401) return;
+  ws.onclose = (event) => {
+    if (socket !== ws) return;
+    socket = null;
+    failCalls();
+    if (event.code === CLOSE_NOT_LINKED) {
+      unlinked();
+      return;
     }
+    markTrouble();
     retryTimer = setTimeout(connect, retryDelay);
     retryDelay = Math.min(retryDelay * 2, RETRY_MAX);
   };
@@ -1265,7 +1329,7 @@ function connect() {
 
 setInterval(() => {
   if (state.phase !== 'app' || document.hidden) return;
-  if (source ? Date.now() - lastEventAt > SILENCE_LIMIT : !retryTimer) connect();
+  if (socket ? Date.now() - lastEventAt > SILENCE_LIMIT : !retryTimer) connect();
 }, 5000);
 
 document.addEventListener('visibilitychange', () => {
@@ -1274,14 +1338,14 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   // iOS drops connections in the background; reopen and catch up.
-  if (state.phase === 'app' && (!source || source.readyState !== EventSource.OPEN || Date.now() - hiddenAt > 3000)) connect();
+  if (state.phase === 'app' && (!socket || socket.readyState !== WebSocket.OPEN || Date.now() - hiddenAt > 3000)) connect();
 });
 window.addEventListener('online', () => { if (state.phase === 'app') connect(); });
 window.addEventListener('pageshow', (event) => { if (event.persisted && state.phase === 'app') connect(); });
 
 async function refreshAll() {
   try {
-    const [threads, bots] = await Promise.all([api('/threads'), api('/bots')]);
+    const [threads, bots] = await Promise.all([rpc('threads.list'), rpc('bots.list')]);
     state.threads = threads.sort(byNewest);
     state.bots = bots;
     saveCache();
@@ -1302,6 +1366,7 @@ function handleEvent(event) {
       troubleTimer = 0;
       retryDelay = 1000;
       if (event.computer) state.computer = event.computer;
+      if (event.device) state.device = event.device;
       setConnection('live');
       refreshAll().then(flush);
       return;
