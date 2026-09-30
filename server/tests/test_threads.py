@@ -13,7 +13,7 @@ from app.services.auth_service import auth_service
 from app.services.conversation_service import ConversationService
 from app.services.event_bus import EventBus
 from app.services.storage_service import StorageService
-from app.services.turn_service import TurnService
+from app.services.turn_service import KEPT_STEPS, TurnService, keep_tool_event
 
 
 class ScriptedProvider:
@@ -236,6 +236,27 @@ class EventStreamTests(unittest.IsolatedAsyncioTestCase):
             bus.publish({"type": "content.delta", "offset": index})
         self.assertEqual(await subscription.next(), {"type": "resync"})
         self.assertTrue(subscription.queue.empty())
+
+
+class ToolEventTests(unittest.TestCase):
+    def test_one_entry_per_action_keeps_what_it_started_with(self):
+        tools = keep_tool_event([], {"type": "tool.started", "requestId": "a", "action": {"preview": "Search"}})
+        tools = keep_tool_event(tools, {"type": "tool.started", "requestId": "b"})
+        tools = keep_tool_event(tools, {"type": "tool.completed", "requestId": "a", "result": {"ok": True}})
+
+        self.assertEqual([tool["requestId"] for tool in tools], ["a", "b"])
+        self.assertEqual(tools[0]["type"], "tool.completed")
+        self.assertEqual(tools[0]["action"], {"preview": "Search"})
+        self.assertEqual(tools[0]["result"], {"ok": True})
+
+    def test_a_busy_reply_keeps_its_latest_steps(self):
+        tools = []
+        for index in range(KEPT_STEPS + 5):
+            tools = keep_tool_event(tools, {"type": "tool.completed", "requestId": f"r{index}"})
+            tools = keep_tool_event(tools, {"type": "tool.failed", "error": "rejected"})  # no id: always new
+
+        self.assertEqual(len(tools), KEPT_STEPS)
+        self.assertEqual(tools[-2]["requestId"], f"r{KEPT_STEPS + 4}")
 
 
 if __name__ == "__main__":

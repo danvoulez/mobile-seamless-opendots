@@ -90,7 +90,7 @@ export function applyChatEvent(chat, event) {
     default:
       if (event.type?.startsWith('tool.') && turn) {
         const { threadId, ...tool } = event;
-        return { ...chat, turn: { ...turn, tools: [...turn.tools, tool].slice(-10) } };
+        return { ...chat, turn: { ...turn, tools: keepToolEvent(turn.tools, tool) } };
       }
       return chat;
   }
@@ -103,21 +103,43 @@ export function toolLabel(name) {
   return { workspace: 'Files', search: 'Web search', computer: 'Computer' }[family] || 'Action';
 }
 
-export const TOOL_STATUS = {
-  started: 'Working…',
-  completed: 'Done',
-  failed: "Didn't work",
-  denied: 'Skipped',
-  expired: 'Skipped',
-};
+// One entry per action: a later event for the same action updates it in place
+// (keeping what it said when it started). The server keeps the same list.
+const KEPT_STEPS = 30;
 
-// One card per action: an approval carries its action's latest result, and
-// other actions show only their latest state.
-export function groupTurnActions(turn) {
-  if (!turn) return { approvals: [], tools: [] };
-  const latest = new Map();
-  (turn.tools || []).forEach((event, index) => latest.set(event.requestId || `i${index}`, event));
-  const approvals = (turn.approvals || []).map((approval) => ({ approval, result: latest.get(approval.requestId) }));
-  const approved = new Set(approvals.map(({ approval }) => approval.requestId));
-  return { approvals, tools: [...latest.entries()].filter(([key]) => !approved.has(key)) };
+export function keepToolEvent(tools, event) {
+  const index = event.requestId ? tools.findIndex((known) => known.requestId === event.requestId) : -1;
+  if (index === -1) return [...tools, event].slice(-KEPT_STEPS);
+  const next = [...tools];
+  next[index] = { ...tools[index], ...event };
+  return next;
+}
+
+// What a step is doing: ask (waiting for you), working, done, failed or skipped.
+export function stepKind(approval, event) {
+  if (approval?.status === 'pending') return 'ask';
+  if (approval && approval.status !== 'allow') return 'skipped';
+  const status = event?.type?.replace('tool.', '');
+  if (!status || status === 'started') return 'working';
+  return { completed: 'done', failed: 'failed' }[status] || 'skipped';
+}
+
+export function stepStatus(kind, approval) {
+  if (kind === 'skipped') return { deny: 'Denied', expired: 'Not answered in time' }[approval?.status] || 'Skipped';
+  return { ask: 'Needs your approval', working: 'Working…', done: 'Done', failed: "Didn't work" }[kind];
+}
+
+// One step per action, in the order they happened; an approval and the
+// action it allowed are the same step, and one still waiting comes last.
+export function turnSteps(turn) {
+  if (!turn) return [];
+  const waiting = new Map((turn.approvals || []).map((approval) => [approval.requestId, approval]));
+  const steps = (turn.tools || []).map((event, index) => {
+    const key = event.requestId || `i${index}`;
+    const approval = waiting.get(key);
+    waiting.delete(key);
+    return { key, approval, event, preview: event.action?.preview };
+  });
+  for (const [key, approval] of waiting) steps.push({ key, approval });
+  return steps;
 }

@@ -2,12 +2,12 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import MessageItem from './MessageItem';
-import ApprovalCard, { ActionStatus, ResultDetails } from './ApprovalCard';
+import ActionStep from './ActionStep';
 import ModelPicker from './ModelPicker';
 import MascotAvatar from './MascotAvatar';
 import { FiPlus, FiMic, FiMicOff, FiMonitor, FiX } from 'react-icons/fi';
 import { uploadImage } from '../lib/api';
-import { groupTurnActions, toolLabel } from '../lib/liveChat';
+import { turnSteps } from '../lib/liveChat';
 
 function formatHeaderDate(msgs) {
   const firstWithDate = msgs?.find((m) => m.created_at);
@@ -35,19 +35,6 @@ function formatMsgTime(createdAt) {
   const d = createdAt ? new Date(createdAt) : null;
   if (!d || isNaN(d.getTime())) return '';
   return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-}
-
-function ToolEvent({ event }) {
-  return (
-    <div className="my-2 max-w-xl rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-[11px] text-slate-300">
-      <div className="flex items-center justify-between gap-3">
-        <span className="font-semibold text-slate-200">{toolLabel(event.tool)}</span>
-        <ActionStatus event={event} />
-      </div>
-      {event.error && <p className="mt-1 text-rose-300">{event.error}</p>}
-      <ResultDetails result={event.result} />
-    </div>
-  );
 }
 
 export default function ChatWindow({
@@ -178,16 +165,24 @@ export default function ChatWindow({
     }
   };
 
-  // Messages, "Continued on iPhone" markers, and the current turn's approval
-  // and tool cards, placed just before the reply they belong to.
+  // Messages, "Continued on iPhone" markers, and the current turn's steps,
+  // placed just before the reply they belong to.
   const renderThread = () => {
-    const actions = groupTurnActions(turn);
-    const turnCards = [
-      ...actions.approvals.map(({ approval, result }) => (
-        <ApprovalCard key={`approval-${approval.requestId}`} approval={approval} result={result} onRespond={handleApprovalResponse} />
-      )),
-      ...actions.tools.map(([key, event]) => <ToolEvent key={`tool-${key}`} event={event} />),
-    ];
+    const steps = turnSteps(turn);
+    const turnCards = steps.length ? [
+      <div key="steps" className="py-0.5">
+        {steps.map((step, index) => (
+          <ActionStep
+            key={step.key}
+            approval={step.approval}
+            event={step.event}
+            preview={step.preview}
+            last={index === steps.length - 1}
+            onRespond={handleApprovalResponse}
+          />
+        ))}
+      </div>,
+    ] : [];
     const items = [];
     let lastOrigin = null;
     let cardsPlaced = false;

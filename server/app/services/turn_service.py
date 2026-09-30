@@ -31,7 +31,7 @@ from app.services.workspace_service import WorkspaceToolError, parse_workspace_c
 logger = logging.getLogger(__name__)
 
 PREVIEW_LENGTH = 200
-KEPT_TOOL_EVENTS = 5
+KEPT_STEPS = 30  # actions kept per reply, so a busy reply still shows its whole run
 
 
 class TurnInProgressError(Exception):
@@ -67,6 +67,17 @@ class TurnState:
             "approvals": list(self.approvals.values()),
             "tools": list(self.tools),
         }
+
+
+def keep_tool_event(tools: List[Dict[str, Any]], event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """One entry per action: a later event for the same action updates it in
+    place (keeping what it said when it started), a new action is added."""
+
+    request_id = event.get("requestId")
+    for index, known in enumerate(tools):
+        if request_id and known.get("requestId") == request_id:
+            return [*tools[:index], {**known, **event}, *tools[index + 1:]]
+    return [*tools, event][-KEPT_STEPS:]
 
 
 def message_preview(message: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -175,7 +186,7 @@ class TurnService:
     def _emit(self, state: TurnState, event: Dict[str, Any]) -> None:
         event = {**event, "threadId": state.thread_id}
         if event["type"].startswith("tool."):
-            state.tools = [*state.tools, {k: v for k, v in event.items() if k != "threadId"}][-KEPT_TOOL_EVENTS:]
+            state.tools = keep_tool_event(state.tools, {k: v for k, v in event.items() if k != "threadId"})
         self.bus.publish(event)
 
     async def _run(self, state: TurnState, bot: Optional[Dict[str, Any]]) -> None:

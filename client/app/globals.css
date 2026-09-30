@@ -85,3 +85,12 @@ body {
   animation: fadeIn 0.15s ease-out forwards;
 }
 
+@keyframes stepIn {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.animate-step-in {
+  animation: stepIn 0.14s ease-out;
+}
+

@@ -96,7 +96,7 @@ its `threadId`.
 | `content.delta` | `botMsgId`, `delta`, `offset` | `offset` is where `delta` starts in the reply text |
 | `request.opened` | `requestId`, `tool`, `summary`, `arguments` | Approval needed |
 | `request.resolved` | `requestId`, `decision` | `allow`, `deny` or `expired` |
-| `tool.started`, `tool.completed`, `tool.failed`, `tool.denied`, `tool.expired` | `tool`, `requestId?`, `result?`, `error?` | |
+| `tool.started`, `tool.completed`, `tool.failed`, `tool.denied`, `tool.expired` | `tool`, `requestId?`, `action?`, `result?`, `error?` | One step per `requestId`: a later event updates the step. The `turn` snapshot keeps the latest 30 steps in `tools` |
 | `turn.completed` | `botMsgId`, `ok`, `message` | The stored reply; `ok: false` marks an error reply |
 | `device.linked`, `device.unlinked` | `device` / `deviceId` | |
 

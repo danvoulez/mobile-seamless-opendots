@@ -45,6 +45,7 @@ const ICONS = {
   add: [['rect', { x: 3, y: 3, width: 18, height: 18, rx: 2, ry: 2 }], ['line', { x1: 12, y1: 8, x2: 12, y2: 16 }], ['line', { x1: 8, y1: 12, x2: 16, y2: 12 }]],
   monitor: [['rect', { x: 2, y: 3, width: 20, height: 14, rx: 2, ry: 2 }], ['line', { x1: 8, y1: 21, x2: 16, y2: 21 }], ['line', { x1: 12, y1: 17, x2: 12, y2: 21 }]],
   clock: [['circle', { cx: 12, cy: 12, r: 10 }], ['polyline', { points: '12 6 12 12 16 14' }]],
+  minus: [['line', { x1: 5, y1: 12, x2: 19, y2: 12 }]],
 };
 
 function icon(name, cls = 'icon') {
@@ -447,9 +448,9 @@ function renderPair({ mode = 'enter', code = '', error = '' } = {}) {
     body = [
       h('h2', null, 'Add to Home Screen'),
       h('ol', { class: 'steps' },
-        h('li', null, h('span', { class: 'step-icon' }, icon('share')), h('span', null, 'Tap ', h('b', null, 'Share'))),
-        h('li', null, h('span', { class: 'step-icon' }, icon('add')), h('span', null, 'Tap ', h('b', null, 'Add to Home Screen'))),
-        h('li', null, h('span', { class: 'step-icon' }, mascot('blue', 'xs')), h('span', null, 'Open it from your Home Screen')),
+        h('li', null, h('span', { class: 'install-icon' }, icon('share')), h('span', null, 'Tap ', h('b', null, 'Share'))),
+        h('li', null, h('span', { class: 'install-icon' }, icon('add')), h('span', null, 'Tap ', h('b', null, 'Add to Home Screen'))),
+        h('li', null, h('span', { class: 'install-icon' }, mascot('blue', 'xs')), h('span', null, 'Open it from your Home Screen')),
       ),
       h('button', { class: 'btn-text', type: 'button', onclick: () => link(code) }, 'Use in Safari'),
     ];
@@ -621,10 +622,10 @@ function renderStatus() {
 }
 
 function previewLine(thread) {
-  if (thread.status === 'waiting') return h('span', { class: 'badge badge-amber' }, 'Needs your approval');
-  if (thread.status === 'running') return h('span', { class: 'live-line' }, typingDots('dots-sm'), 'Replying…');
+  if (thread.status === 'waiting') return h('span', { class: 'state state-amber' }, icon('shield', 'icon icon-xs'), 'Needs your approval');
+  if (thread.status === 'running') return h('span', { class: 'state state-blue' }, typingDots('dots-sm'), 'Replying…');
   if (queuedFor(thread.id).some((item) => item.status === 'waiting')) {
-    return h('span', { class: 'queued-line' }, icon('clock', 'icon icon-xs'), 'Waiting to send');
+    return h('span', { class: 'state' }, icon('clock', 'icon icon-xs'), 'Waiting to send');
   }
   const message = thread.last_message;
   if (!message) return 'New chat';
@@ -650,7 +651,7 @@ function continueCard(thread) {
   const elsewhere = from && from !== state.device?.name;
   return h('button', { class: 'continue-card', type: 'button', onclick: () => openThread(thread.id) },
     h('div', { class: 'continue-label' },
-      icon(elsewhere ? 'monitor' : 'chevron', 'icon icon-xs'),
+      h('i', { class: `pip${thread.status !== 'idle' ? ' live' : ''}` }),
       h('span', null, elsewhere ? `Continue from ${from}` : 'Continue'),
       h('span', { class: 'continue-when' }, ago(thread.updated_at))),
     h('div', { class: 'continue-main' },
@@ -869,70 +870,81 @@ function toolLabel(name) {
   return { workspace: 'Files', search: 'Web search', computer: 'Computer' }[family] || 'Action';
 }
 
-const TOOL_STATUS = { started: 'Working…', completed: 'Done', failed: "Didn't work", denied: 'Skipped', expired: 'Skipped' };
+// Each thing the assistant does in a reply is one small step: an icon, a line
+// of text, and a thin rail joining it to the next, so a busy reply reads as a
+// quick run of steps rather than a stack of boxes.
+function stepKind(approval, event) {
+  if (approval?.status === 'pending') return 'ask';
+  if (approval && approval.status !== 'allow') return 'skipped';
+  const status = event?.type.replace('tool.', '');
+  if (!status || status === 'started') return 'working';
+  return { completed: 'done', failed: 'failed' }[status] || 'skipped';
+}
+
+const STEP_ICONS = { ask: 'shield', done: 'check', failed: 'x', skipped: 'minus' };
+
+function stepStatus(kind, approval) {
+  if (kind === 'skipped') return { deny: 'Denied', expired: 'Not answered in time' }[approval?.status] || 'Skipped';
+  return { ask: 'Needs your approval', working: 'Working…', done: 'Done', failed: "Didn't work" }[kind];
+}
 
 function resultDetails(event) {
   if (!event?.result) return null;
-  return h('details', { class: 'tool-details' },
+  return h('details', { class: 'step-details' },
     h('summary', null, 'Details'),
     h('pre', null, JSON.stringify(event.result, null, 2)));
 }
 
-function approvalItem(approval, result) {
-  const busy = state.approvalsBusy.has(approval.requestId);
-  const pending = approval.status === 'pending';
-  const heading = { pending: 'Approval needed', allow: 'Approved', deny: 'Denied', expired: 'Not answered in time' }[approval.status];
-  const outcome = result && TOOL_STATUS[result.type.replace('tool.', '')];
+function stepItem(key, { approval, event, preview }) {
+  const kind = stepKind(approval, event);
+  const label = toolLabel(approval?.tool || event?.tool);
+  const title = approval?.summary || preview || label;
+  const busy = approval ? state.approvalsBusy.has(approval.requestId) : false;
   return {
-    key: `approval-${approval.requestId}`,
-    sig: `${approval.status}|${busy}|${result?.type || ''}`,
-    build: () => h('div', { class: `approval approval-${approval.status}` },
-      h('div', { class: 'approval-head' },
-        h('span', { class: 'approval-kicker' }, icon('shield', 'icon icon-sm'), heading),
-        h('span', { class: 'approval-tool' }, toolLabel(approval.tool))),
-      h('div', { class: 'approval-body' },
-        h('span', { class: 'approval-icon' }, icon('terminal', 'icon icon-sm')),
-        h('p', { class: 'approval-summary' }, approval.summary || 'An action needs your approval.')),
-      pending
-        ? h('div', { class: 'approval-actions' },
-          h('button', { class: 'btn-deny', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'deny') }, icon('x', 'icon icon-sm'), 'Deny'),
-          h('button', { class: 'btn-allow', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'allow') }, icon('check', 'icon icon-sm'), 'Allow'))
-        : outcome && approval.status === 'allow'
-          ? h('div', { class: 'approval-foot' },
-            h('span', { class: `tool-status ${result.type.replace('tool.', '')}` }, outcome),
-            result.error ? h('span', { class: 'tool-error' }, result.error) : null,
-            resultDetails(result))
-          : null),
+    key: `step-${key}`,
+    sig: `${kind}|${busy}|${event?.type || ''}`,
+    build: () => h('div', { class: `step step-${kind}` },
+      h('span', { class: 'step-icon' }, kind === 'working' ? h('i', { class: 'spinner' }) : icon(STEP_ICONS[kind])),
+      h('div', { class: 'step-main' },
+        h('p', { class: 'step-title' }, title),
+        h('p', { class: 'step-meta' },
+          title !== label ? h('span', { class: 'step-tag' }, label) : null,
+          h('span', { class: 'step-status' }, stepStatus(kind, approval))),
+        event?.error ? h('p', { class: 'step-error' }, event.error) : null,
+        kind === 'ask'
+          ? h('div', { class: 'step-actions' },
+            h('button', { class: 'btn-deny', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'deny') }, 'Deny'),
+            h('button', { class: 'btn-allow', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'allow') }, icon('check', 'icon icon-sm'), 'Allow'))
+          : null,
+        resultDetails(event))),
   };
 }
 
-function toolItem(event, key) {
-  const status = event.type.replace('tool.', '');
-  return {
-    key: `tool-${key}`,
-    sig: status,
-    build: () => h('div', { class: 'tool' },
-      h('div', { class: 'tool-head' },
-        h('span', { class: 'tool-name' }, toolLabel(event.tool)),
-        h('span', { class: `tool-status ${status}` }, TOOL_STATUS[status] || status)),
-      event.error ? h('p', { class: 'tool-error' }, event.error) : null,
-      resultDetails(event)),
-  };
+// One entry per action: a later event for the same action updates it in place
+// (keeping what it said when it started). Matches the Mac's copy of the turn.
+const KEPT_STEPS = 30;
+
+function keepToolEvent(tools, event) {
+  const index = event.requestId ? tools.findIndex((known) => known.requestId === event.requestId) : -1;
+  if (index === -1) return [...tools, event].slice(-KEPT_STEPS);
+  const next = [...tools];
+  next[index] = { ...tools[index], ...event };
+  return next;
 }
 
-// One card per action: approvals carry their own outcome; other actions show
-// only their latest state.
+// One step per action, in the order they happened; an approval and the
+// action it allowed are the same step, and one still waiting comes last.
 function turnItems(turn) {
   if (!turn) return [];
-  const latest = new Map();
-  (turn.tools || []).forEach((event, index) => latest.set(event.requestId || `i${index}`, event));
-  const approved = new Set((turn.approvals || []).map((approval) => approval.requestId));
-  return [
-    ...(turn.approvals || []).map((approval) => approvalItem(approval, latest.get(approval.requestId))),
-    ...[...latest.entries()]
-      .filter(([requestId]) => !approved.has(requestId))
-      .map(([key, event]) => toolItem(event, key)),
-  ];
+  const waiting = new Map((turn.approvals || []).map((approval) => [approval.requestId, approval]));
+  const steps = (turn.tools || []).map((event, index) => {
+    const key = event.requestId || `i${index}`;
+    const approval = waiting.get(key);
+    waiting.delete(key);
+    return stepItem(key, { approval, event, preview: event.action?.preview });
+  });
+  for (const [key, approval] of waiting) steps.push(stepItem(key, { approval }));
+  return steps;
 }
 
 function chatItems() {
@@ -1511,7 +1523,7 @@ function handleEvent(event) {
     default:
       if (event.type.startsWith('tool.') && turn) {
         const { threadId, ...tool } = event;
-        turn.tools = [...turn.tools, tool].slice(-10);
+        turn.tools = keepToolEvent(turn.tools, tool);
         schedule(renderMessages);
       }
   }
