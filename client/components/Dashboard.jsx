@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Sidebar from './Sidebar';
 import ChatWindow from './ChatWindow';
 import ComputerPanel from './ComputerPanel';
@@ -8,6 +8,7 @@ import Marketplace from './Marketplace';
 import AuditPanel from './AuditPanel';
 import AppSettingsDrawer from './AppSettingsDrawer';
 import ContinuityPanel from './ContinuityPanel';
+import NewAssistantDialog from './NewAssistantDialog';
 
 import {
   fetchBots,
@@ -39,6 +40,7 @@ export default function Dashboard({ onLogout }) {
   const [activeTab, setActiveTab] = useState('chat'); // 'chat' | 'computer' | 'marketplace' | 'audit'
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isContinuityOpen, setIsContinuityOpen] = useState(false);
+  const [isNewBotOpen, setIsNewBotOpen] = useState(false);
   const [deviceEvent, setDeviceEvent] = useState(null);
   const [connection, setConnection] = useState('reconnecting');
   const [update, setUpdate] = useState(null);
@@ -55,6 +57,14 @@ export default function Dashboard({ onLogout }) {
   const activeThread = threads.find((t) => t.id === activeThreadId) || null;
   const activeBotId = activeThread?.bot_id || draftBotId;
   const activeBot = bots.find((b) => b.id === activeBotId) || bots[0];
+
+  // Models used lately: those of the assistants behind the newest chats first
+  // (threads arrive newest first), then the other assistants', then the default.
+  const recentModelIds = useMemo(() => {
+    const modelOf = new Map(bots.map((b) => [b.id, b.model]));
+    const ids = [...threads.map((t) => modelOf.get(t.bot_id)), ...bots.map((b) => b.model), defaultModel];
+    return [...new Set(ids.filter(Boolean))];
+  }, [threads, bots, defaultModel]);
 
   const selectThread = useCallback((threadId) => {
     setActiveTab('chat');
@@ -264,26 +274,18 @@ export default function Dashboard({ onLogout }) {
     }
   };
 
-  const handleCreateNewBot = async () => {
-    const name = prompt('Enter Bot Name:', 'New Assistant');
-    if (!name) return;
-    const role = prompt('Enter Role:', 'General Intelligence');
-    const model = prompt('Enter Model:', defaultModel);
-
-    try {
-      const newBot = await createBot({
-        name,
-        role: role || 'AI Assistant',
-        model: model || defaultModel,
-        description: `Custom assistant configured to use ${model || defaultModel}.`,
-        avatar: '🤖',
-        system_prompt: `You are ${name}, a helpful AI assistant.`
-      });
-      setBots((prev) => [...prev, newBot]);
-      startDraft(newBot.id);
-    } catch (err) {
-      console.error('Failed to create bot:', err);
-    }
+  const handleCreateNewBot = async ({ name, role, model }) => {
+    const newBot = await createBot({
+      name,
+      role: role || 'AI Assistant',
+      model,
+      description: `Custom assistant that talks with ${model}.`,
+      avatar: '🤖',
+      system_prompt: `You are ${name}, a helpful AI assistant.`
+    });
+    setBots((prev) => [...prev, newBot]);
+    setIsNewBotOpen(false);
+    startDraft(newBot.id);
   };
 
   return (
@@ -302,7 +304,7 @@ export default function Dashboard({ onLogout }) {
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         onOpenSettings={() => setIsSettingsOpen(!isSettingsOpen)}
-        onOpenNewBot={handleCreateNewBot}
+        onOpenNewBot={() => setIsNewBotOpen(true)}
         onOpenContinuity={() => setIsContinuityOpen(true)}
         connection={connection}
         update={update}
@@ -317,6 +319,7 @@ export default function Dashboard({ onLogout }) {
             botIndex={bots.findIndex((b) => b.id === activeBot?.id)}
             thread={activeThread}
             models={models}
+            recentModelIds={recentModelIds}
             messages={chat.messages}
             turn={chat.turn}
             loading={chat.loading}
@@ -360,6 +363,16 @@ export default function Dashboard({ onLogout }) {
         isOpen={isContinuityOpen}
         onClose={() => setIsContinuityOpen(false)}
         deviceEvent={deviceEvent}
+      />
+
+      <NewAssistantDialog
+        isOpen={isNewBotOpen}
+        onClose={() => setIsNewBotOpen(false)}
+        onCreate={handleCreateNewBot}
+        models={models}
+        recentIds={recentModelIds}
+        defaultModel={defaultModel}
+        avatarType={bots.length % 2 === 1 ? 'pink' : 'blue'}
       />
     </div>
   );

@@ -1,11 +1,14 @@
 from fastapi import APIRouter
 from typing import List
+from app.config import settings
 from app.schemas.contracts import ModelInfo
+from app.services.model_catalog import model_catalog
 from app.services.storage_service import storage_service
 
 router = APIRouter(prefix="/api/v1/models", tags=["models"])
 
-# Model IDs available through the configured inference endpoint.
+# The original Prediction API service's models: offered when the provider
+# lists none and Settings names none.
 AVAILABLE_MODELS: List[ModelInfo] = [
     # Claude Family
     ModelInfo(id="claude-sonnet-4-5", name="Claude 4.5 Sonnet", provider="Anthropic", description="Advanced code generation & refactoring agent", recommended=True),
@@ -49,7 +52,18 @@ AVAILABLE_MODELS: List[ModelInfo] = [
 
 @router.get("", response_model=List[ModelInfo])
 async def list_models():
+    """The provider's own live list when it publishes one (Vercel AI Gateway
+    does), else the model IDs typed in Settings, else the list above."""
     configured = storage_service.get_settings()
+    base_url = (configured.get("model_api_base_url") or settings.MODEL_API_BASE_URL).rstrip("/")
+    if configured.get("model_api_wire_api") == "responses" and base_url:
+        live = await model_catalog.chat_models(
+            base_url,
+            configured.get("model_api_key") or settings.MODEL_API_KEY,
+            configured.get("model_api_headers") or {},
+        )
+        if live:
+            return live
     if configured.get("model_ids"):
         return [
             ModelInfo(id=model_id, name=model_id, provider="Configured provider",

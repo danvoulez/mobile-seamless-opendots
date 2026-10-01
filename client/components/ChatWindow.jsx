@@ -42,6 +42,7 @@ export default function ChatWindow({
   botIndex = 0,
   thread,
   models,
+  recentModelIds,
   messages,
   turn,
   loading,
@@ -266,6 +267,7 @@ export default function ChatWindow({
         <div className="flex items-center gap-3">
           <ModelPicker
             models={models}
+            recentIds={recentModelIds}
             currentModel={activeModel}
             onSelectModel={handleModelChange}
           />
