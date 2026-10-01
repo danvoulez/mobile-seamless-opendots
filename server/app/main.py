@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -213,6 +213,24 @@ app.mount("/m", StaticFiles(directory=settings.MOBILE_DIR, check_dir=False), nam
 # Whatever the routes above don't answer is the Mac page, on this same address,
 # so any computer on the network can open it (and add it to its Dock). Absent
 # until the web client is built; scripts/start-mac.sh builds it before starting.
+
+# Phones that open the bare address (typed, or through the tunnel) get their
+# own app. iPads say "Macintosh" by default and get the Mac page, which fits.
+PHONE_USER_AGENT = re.compile(r"iPhone|iPod|Android.*Mobile", re.IGNORECASE)
+
+
+@app.get("/", include_in_schema=False)
+async def home(request: Request):
+    # The answer depends on the device: caches must keep them apart.
+    vary = {"Vary": "User-Agent"}
+    if PHONE_USER_AGENT.search(request.headers.get("user-agent", "")):
+        return RedirectResponse(_with_pair("/m/", request), headers=vary)
+    page = settings.WEB_DIR / "index.html"
+    if not page.is_file():
+        return JSONResponse({"detail": "The Mac page isn't built yet. Start Open Dots with scripts/start-mac.sh."}, status_code=404, headers=vary)
+    return FileResponse(page, headers=vary)
+
+
 # Mounted last: it would otherwise answer every path.
 if settings.WEB_DIR.is_dir():
     app.mount("/", StaticFiles(directory=settings.WEB_DIR, html=True), name="web")
