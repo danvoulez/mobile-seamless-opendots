@@ -93,6 +93,12 @@ main() {
   # Tells the uninstaller this folder was created by the installer.
   printf '%s\n' "$app_dir" > "$data_dir/.installed-app"
   say "Open Dots is in $app_dir"
+  # The downloaded version's own settings and checks: its port (and
+  # open-dots.env), whether it is up, its address on the network.
+  ROOT="$app_dir"
+  export DATA_DIR="$data_dir"
+  # shellcheck source=lib.sh
+  . "$app_dir/scripts/lib.sh"
 
   # ----- set up ---------------------------------------------------------------
   step "Setting up (a minute or two the first time)"
@@ -116,10 +122,9 @@ main() {
     DATA_DIR="$data_dir" nohup "$app_dir/scripts/start-mac.sh" --no-open >"$data_dir/logs/open-dots.log" 2>&1 &
     say "Open Dots is running until you restart this computer. Log: $data_dir/logs/open-dots.log"
   fi
-  local ready=0 _
+  local ready=0 network _
   for _ in $(seq 1 240); do
-    if curl -fsS -m 5 http://127.0.0.1:8000/api/v1/health >/dev/null 2>&1 \
-      && curl -fsS -m 10 -o /dev/null http://127.0.0.1:3000 2>/dev/null; then
+    if api_ready && web_ready; then
       ready=1
       break
     fi
@@ -128,7 +133,10 @@ main() {
   [ "$ready" = 1 ] || fail "Open Dots didn't start. Try: $app_dir/scripts/start-mac.sh"
 
   step "Open Dots is ready"
-  say "  On this Mac      http://localhost:3000"
+  say "  On this Mac      http://localhost:${OPEN_DOTS_PORT:-4747}"
+  if network=$(network_url 2>/dev/null); then
+    say "  On your network  $network   (on another Mac: open it in Safari, then File → Add to Dock)"
+  fi
   say "  On your iPhone   choose Continue on iPhone in Open Dots and scan the code"
   say "  Updates          install by themselves (Settings → Updates)"
   say "  Signed out?      $app_dir/scripts/start-mac.sh --sign-in"

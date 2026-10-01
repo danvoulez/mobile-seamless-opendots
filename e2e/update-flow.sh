@@ -4,7 +4,7 @@
 #   update to a new version from the API (as the Update button does),
 #   try a broken version and roll back (code and database),
 #   pick up a fixed version automatically, then uninstall.
-# Uses ports 8000 and 3000. Runs on Linux and macOS.
+# Uses port 4747. Runs on Linux and macOS.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,7 +13,8 @@ ORIGIN="$WORK/origin.git"
 SRC="$WORK/src"
 export DATA_DIR="$WORK/data"
 export OPEN_DOTS_HOME="$WORK/app"
-API=http://127.0.0.1:8000/api/v1
+API=http://127.0.0.1:4747/api/v1
+WEB=http://127.0.0.1:4747/
 
 log() { printf '[update-flow] %s\n' "$*"; }
 fail() {
@@ -59,6 +60,7 @@ running_commit() { api "$API/system/update" | json "d['current']['commit']"; }
 last_state() { api "$API/system/update" | json "(d.get('last') or {}).get('state')"; }
 is_running() { [ "$(running_commit 2>/dev/null)" = "$1" ]; }
 last_is() { [ "$(last_state 2>/dev/null)" = "$1" ]; }
+mac_page_served() { case "$(curl -fsS "$WEB")" in *'<title>Open Dots'*) return 0 ;; esac; return 1; }
 
 publish() {  # message
   git_in "$SRC" add -A
@@ -87,6 +89,7 @@ OPEN_DOTS_REPO="file://$ORIGIN" bash "$SRC/scripts/install.sh" --yes --no-backgr
   || fail "install.sh"
 [ -d "$OPEN_DOTS_HOME/.git" ] || fail "no app folder"
 is_running "$V1" || fail "not running version 1"
+mac_page_served || fail "the server doesn't serve the Mac page"
 api -X PUT -H 'Content-Type: application/json' -d '{"auto": false}' "$API/system/update" >/dev/null
 
 log "signing in with a one-time link"
@@ -109,6 +112,7 @@ wait_for 300 "version 2 to be running" is_running "$V2"
 wait_for 30 "the update to be confirmed" last_is "done"
 [ "$(cat "$OPEN_DOTS_HOME/client/.next/.open-dots-source")" = "$(git -C "$OPEN_DOTS_HOME" rev-parse HEAD:client)" ] \
   || fail "the web client wasn't rebuilt"
+mac_page_served || fail "the Mac page is gone after the update"
 curl -fsS -b "$WORK/cookies" "$API/bots" >/dev/null || fail "the update signed the browser out"
 log "version 2 is running and the browser is still signed in"
 

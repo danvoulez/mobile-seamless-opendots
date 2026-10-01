@@ -86,6 +86,12 @@ async def require_authentication(request: Request, call_next):
         if path == "/m" or path.startswith("/m/"):
             response.headers.update(MOBILE_HEADERS)
             response.headers["Content-Security-Policy"] = mobile_csp(request)
+        elif not path.startswith("/api/"):
+            # The Mac page's scripts carry the build in their names; the page
+            # itself doesn't, so it is fetched fresh and an update shows at once.
+            immutable = path.startswith("/_next/static/") and response.status_code == 200
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if immutable else "no-cache"
+            response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
     user = auth_service.authenticate_request(request)
@@ -162,7 +168,6 @@ def _with_pair(url: str, request: Request) -> str:
     return f"{url}?pair={code}" if code else url
 
 
-@app.get("/", include_in_schema=False)
 @app.get("/m", include_in_schema=False)
 async def mobile_redirect(request: Request):
     return RedirectResponse(_with_pair("/m/", request))
@@ -202,3 +207,12 @@ async def mobile_manifest(request: Request):
 
 
 app.mount("/m", StaticFiles(directory=settings.MOBILE_DIR, check_dir=False), name="mobile")
+
+
+# ----- Open Dots on the Mac, and on other computers -------------------------
+# Whatever the routes above don't answer is the Mac page, on this same address,
+# so any computer on the network can open it (and add it to its Dock). Absent
+# until the web client is built; scripts/start-mac.sh builds it before starting.
+# Mounted last: it would otherwise answer every path.
+if settings.WEB_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=settings.WEB_DIR, html=True), name="web")

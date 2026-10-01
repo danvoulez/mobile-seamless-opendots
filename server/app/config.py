@@ -55,26 +55,32 @@ class Settings:
     COMPUTER_REMOTE_WIDTH: int = int(os.getenv("COMPUTER_REMOTE_WIDTH", "1280"))
     COMPUTER_REMOTE_HEIGHT: int = int(os.getenv("COMPUTER_REMOTE_HEIGHT", "720"))
     COMPUTER_REMOTE_FPS: int = int(os.getenv("COMPUTER_REMOTE_FPS", "10"))
+    # Other pages allowed to use the API from a browser. Pages this server serves
+    # are always allowed (request_guard); `npm run dev` needs its own origin here.
+    # No default: whatever runs on localhost:3000 is not Open Dots.
     CORS_ORIGINS = [
         origin.strip()
-        for origin in os.getenv(
-            "CORS_ORIGINS",
-            "http://127.0.0.1:3000,http://localhost:3000",
-        ).split(",")
+        for origin in os.getenv("CORS_ORIGINS", "").split(",")
         if origin.strip()
     ]
     HOST: str = os.getenv("HOST", "127.0.0.1")
-    PORT: int = int(os.getenv("PORT", "8000"))
+    # One address for the Mac page, the iPhone app and the API. Not 8000 or
+    # 3000: many other tools use those. scripts/lib.sh passes OPEN_DOTS_PORT.
+    PORT: int = int(os.getenv("PORT", "4747"))
     # Address linked phones use to reach this computer, e.g. a Tailscale
     # HTTPS name. Detected from the local network when empty.
     PUBLIC_URL: str = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
     MOBILE_DIR: Path = Path(
         os.getenv("MOBILE_DIR", str(Path(__file__).resolve().parents[2] / "mobile"))
     ).expanduser().resolve()
+    # The Mac page, exported by `next build` (client/next.config.mjs).
+    WEB_DIR: Path = Path(
+        os.getenv("WEB_DIR", str(Path(__file__).resolve().parents[2] / "client" / "out"))
+    ).expanduser().resolve()
     DEVICE_SESSION_MAX_AGE: int = int(os.getenv("DEVICE_SESSION_MAX_AGE", str(400 * 86400)))
     PAIRING_CODE_TTL_SECONDS: int = int(os.getenv("PAIRING_CODE_TTL_SECONDS", "600"))
-    # The web client on this computer, for links that open it signed in.
-    WEB_URL: str = os.getenv("WEB_URL", "http://localhost:3000").strip().rstrip("/")
+    # The Mac page on this computer, for links that open it signed in.
+    WEB_URL: str = os.getenv("WEB_URL", f"http://localhost:{PORT}").strip().rstrip("/")
     # Updates: this computer follows a branch that CI moves only to tested
     # commits. Checks run while Open Dots is started by scripts/start-mac.sh.
     UPDATE_CHANNEL: str = os.getenv("UPDATE_CHANNEL", "stable").strip() or "stable"

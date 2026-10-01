@@ -3,8 +3,11 @@ import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { chromium, request } from 'playwright';
 
-export const API = process.env.E2E_API || 'http://127.0.0.1:8000';
-export const WEB = process.env.E2E_WEB || 'http://localhost:3000';
+// One server serves the Mac page, the iPhone app and the API. The Mac opens it
+// as localhost and the phone as 127.0.0.1, so each keeps its own cookies.
+export const PORT = process.env.E2E_PORT || '4747';
+export const API = process.env.E2E_API || `http://127.0.0.1:${PORT}`;
+export const WEB = process.env.E2E_WEB || `http://localhost:${PORT}`;
 export const TOKEN = process.env.E2E_TOKEN || 'e2e-owner-token';
 export const MODEL_URL = process.env.E2E_MODEL_URL || 'http://127.0.0.1:9100/v1';
 export const ROOT = fileURLToPath(new URL('..', import.meta.url));

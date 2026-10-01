@@ -6,7 +6,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { devices } from 'playwright';
-import { API, ROOT, TOKEN, launch, ok, owner, suite, useFakeModel } from './lib.mjs';
+import { API, PORT, ROOT, TOKEN, launch, ok, owner, suite, useFakeModel } from './lib.mjs';
 
 const { log, shot, check, watch } = suite('resilience');
 const python = process.env.E2E_PYTHON || join(ROOT, 'server/.venv/bin/python');
@@ -15,7 +15,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let server;
 async function startServer() {
-  server = spawn(python, ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000'], {
+  server = spawn(python, ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', PORT], {
     cwd: join(ROOT, 'server'), env, stdio: 'ignore',
   });
   for (let i = 0; i < 80; i++) {

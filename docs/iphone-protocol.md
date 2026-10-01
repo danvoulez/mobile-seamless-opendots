@@ -13,7 +13,7 @@ such as Cloudflare Tunnel. The server side is `server/app/routers/rpc.py`.
 | | |
 | --- | --- |
 | Through Cloudflare Tunnel | `wss://dots.example.com/api/v1/rpc` (your `PUBLIC_URL`) |
-| On the same Wi-Fi | `ws://your-mac.local:8000/api/v1/rpc` |
+| On the same Wi-Fi | `ws://your-mac.local:4747/api/v1/rpc` |
 
 Authenticate with the device credential the phone received when it was
 linked: send it as `Authorization: Bearer odd_…` (native apps) or let the

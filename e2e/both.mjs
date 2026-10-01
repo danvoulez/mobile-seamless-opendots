@@ -33,7 +33,7 @@ await mac.screenshot({ path: shot('02-mac-continuity') });
 const phoneContext = await browser.newContext({ ...devices['iPhone 15'] });
 const phone = await phoneContext.newPage();
 watch(phone, 'phone');
-await phone.goto(`${API}/`);
+await phone.goto(`${API}/m`);
 await phone.locator('#pair-code').waitFor();
 await phone.screenshot({ path: shot('03-phone-enter-code') });
 await phone.locator('#pair-code').fill(code.replace('-', '').toLowerCase());

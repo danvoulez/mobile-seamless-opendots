@@ -8,11 +8,11 @@
 #   ./scripts/start-mac.sh --remove-login-item   stop running it in the background
 #   ./scripts/start-mac.sh --setup-only          install and build, don't start
 #
-# The API listens on your local network so a linked iPhone can reach it; the
-# web client stays on this Mac. While Open Dots runs, the Mac is kept from
-# idle-sleeping (the display can still sleep) so your phone can reach it. Set
-# OPEN_DOTS_ALLOW_SLEEP=1 to skip that. Updates install through this script:
-# see scripts/update.sh.
+# One process on one address (port 4747, OPEN_DOTS_PORT) serves the Mac page,
+# the iPhone app and the API, and listens on your local network so your iPhone
+# and your other computers can reach it. While Open Dots runs, the Mac is kept
+# from idle-sleeping (the display can still sleep). Set OPEN_DOTS_ALLOW_SLEEP=1
+# to skip that. Updates install through this script: see scripts/update.sh.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,14 +23,13 @@ OPEN_BROWSER=1
 SETUP_ONLY=0
 PIDS=""
 SERVER_PID=""
-WEB_PID=""
 UPDATE_REQUESTED=0
 
 open_web() {
   local url
   [ "$OPEN_BROWSER" = 1 ] || return 0
   url=$(signin_url) || url=""
-  open_url "${url:-http://localhost:$WEB_PORT}" || true
+  open_url "${url:-http://localhost:$OPEN_DOTS_PORT}" || true
 }
 
 sign_in() {
@@ -57,10 +56,11 @@ stop() {
 start_children() {
   local host="${HOST:-0.0.0.0}"
   cd "$ROOT/server"
-  # Listen on the local network so a linked iPhone can reach this Mac. The
-  # server asks this script (by its process id) to install updates.
-  HOST="$host" PORT="$API_PORT" OPEN_DOTS_SUPERVISOR_PID=$$ \
-    .venv/bin/python -m uvicorn app.main:app --host "$host" --port "$API_PORT" &
+  # Listen on the local network so a linked iPhone and your other computers can
+  # reach this Mac. The server also serves the built Mac page (client/out). It
+  # asks this script (by its process id) to install updates.
+  HOST="$host" PORT="$OPEN_DOTS_PORT" OPEN_DOTS_SUPERVISOR_PID=$$ \
+    .venv/bin/python -m uvicorn app.main:app --host "$host" --port "$OPEN_DOTS_PORT" &
   SERVER_PID=$!
   PIDS="$SERVER_PID"
 
@@ -68,10 +68,6 @@ start_children() {
     caffeinate -i -w "$SERVER_PID" &
     PIDS="$PIDS $!"
   fi
-
-  (cd "$ROOT/client" && exec ./node_modules/.bin/next start -H 127.0.0.1 -p "$WEB_PORT") &
-  WEB_PID=$!
-  PIDS="$PIDS $WEB_PID"
   cd "$ROOT"
 }
 
@@ -79,7 +75,7 @@ wait_until_ready() {
   local _
   for _ in $(seq 1 240); do
     api_ready && web_ready && return 0
-    kill -0 "$SERVER_PID" 2>/dev/null && kill -0 "$WEB_PID" 2>/dev/null || return 1
+    kill -0 "$SERVER_PID" 2>/dev/null || return 1
     sleep 0.5
   done
   return 1
@@ -116,13 +112,13 @@ keep_running_prompt() {
   esac
   install_login_item
   for _ in $(seq 1 240); do api_ready && web_ready && break; sleep 0.5; done
-  say "Open Dots is running in the background: http://localhost:$WEB_PORT"
+  say "Open Dots is running in the background: http://localhost:$OPEN_DOTS_PORT"
   open_web
   exit 0
 }
 
 main() {
-  local arg verifying=0
+  local arg verifying=0 network
   for arg in "$@"; do
     case "$arg" in
       --no-open) OPEN_BROWSER=0 ;;
@@ -148,7 +144,7 @@ main() {
       # over when it stops, instead of exiting and being restarted every few seconds.
       while api_ready; do sleep 15; done
     else
-      say "Open Dots is already running: http://localhost:$WEB_PORT"
+      say "Open Dots is already running: http://localhost:$OPEN_DOTS_PORT"
       open_web
       exit 0
     fi
@@ -188,12 +184,14 @@ main() {
   if [ "$verifying" = 1 ]; then
     "$ROOT/scripts/update.sh" confirm || true
   else
+    network=$(network_url) || network="(only this Mac: HOST is set to loopback)"
     cat <<MESSAGE
 
   Open Dots is running.
 
-  On this Mac     http://localhost:$WEB_PORT
-  On your iPhone  Choose "Continue on iPhone" in Open Dots and scan the code.
+  On this Mac      http://localhost:$OPEN_DOTS_PORT
+  On your network  $network
+  On your iPhone   Choose "Continue on iPhone" in Open Dots and scan the code.
 
   Signed out? Run: $0 --sign-in
   If macOS asks whether Python may accept incoming connections, choose Allow.
@@ -203,14 +201,14 @@ MESSAGE
     open_web
   fi
 
-  # If either part stops, stop both, so a restart (by you, or by the background
-  # login item) brings Open Dots back whole.
-  while kill -0 "$SERVER_PID" 2>/dev/null && kill -0 "$WEB_PID" 2>/dev/null; do
+  # If the server stops, exit too, so a restart (by you, or by the background
+  # login item) brings Open Dots back.
+  while kill -0 "$SERVER_PID" 2>/dev/null; do
     if update_requested; then restart_for_update; fi
     sleep 2
   done
   if update_requested; then restart_for_update; fi
-  warn "Part of Open Dots stopped; stopping the rest."
+  warn "Open Dots stopped."
   exit 1
 }
 

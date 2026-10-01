@@ -3,6 +3,7 @@ import './globals.css';
 export const metadata = {
   title: 'Open Dots — Open-Source Alternative to OpenAI Dots',
   description: 'Open-source alternative to OpenAI Dots: a self-hosted AI workspace for chat, tools, approvals, connectors, and computer tasks.',
+  icons: { apple: '/m/icons/icon-180.png' },
 };
 
 export default function RootLayout({ children }) {

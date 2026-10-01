@@ -77,7 +77,8 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
 
   const remaining = pairing ? Math.max(0, Math.round((pairing.expiresAt - now) / 1000)) : 0;
   const expired = pairing && remaining === 0;
-  const host = pairing?.url ? new URL(pairing.url).host : '';
+  // The bare address opens the Mac page; the phone app lives under /m.
+  const phoneAddress = pairing?.url ? `${new URL(pairing.url).host}/m` : '';
 
   const handleUnlink = async (device) => {
     if (!confirm(`Unlink ${device.name}? It stops working right away.`)) return;
@@ -137,7 +138,7 @@ export default function ContinuityPanel({ isOpen, onClose, deviceEvent }) {
             <div className="min-w-0 space-y-2">
               <p className="text-xs font-semibold text-zinc-100">Scan with your iPhone</p>
               <p className="text-[11px] text-zinc-400 leading-relaxed">
-                Or go to <span className="font-mono text-zinc-300 break-all">{host || '…'}</span> in Safari and enter:
+                Or go to <span className="font-mono text-zinc-300 break-all">{phoneAddress || '…'}</span> in Safari and enter:
               </p>
               <p className="font-mono text-lg font-semibold tracking-[0.15em] text-white select-all">{pairing?.code || '····-····'}</p>
               {expired ? (

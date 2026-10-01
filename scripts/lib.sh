@@ -19,18 +19,29 @@ PIDFILE="$DATA_DIR/open-dots.pid"
 UPDATE_DIR="$DATA_DIR/update"
 # The server asks for an update by creating this file (and sending SIGUSR1).
 UPDATE_REQUEST="$UPDATE_DIR/requested"
-API_PORT=8000   # the web client expects the API here
-WEB_PORT=3000
+# One address serves the Mac page, the iPhone app and the API. Not 3000 or
+# 8000: many other tools use those. Set OPEN_DOTS_PORT in open-dots.env to change it.
+OPEN_DOTS_PORT="${OPEN_DOTS_PORT:-4747}"
 
 say() { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
 
 api_ready() {
-  curl -fsS -m 5 "http://127.0.0.1:$API_PORT/api/v1/health" >/dev/null 2>&1
+  curl -fsS -m 5 "http://127.0.0.1:$OPEN_DOTS_PORT/api/v1/health" >/dev/null 2>&1
 }
 
+# The Mac page is served (it is missing until the web client is built).
 web_ready() {
-  curl -fsS -m 10 -o /dev/null "http://127.0.0.1:$WEB_PORT" 2>/dev/null
+  curl -fsS -m 10 -o /dev/null "http://127.0.0.1:$OPEN_DOTS_PORT/" 2>/dev/null
+}
+
+# The address other computers and phones on this network use: the Bonjour name,
+# which stays valid when the IP changes. Nothing when Open Dots stays on loopback.
+network_url() {
+  local name
+  case "${HOST:-0.0.0.0}" in 127.0.0.1|localhost|::1) return 1 ;; esac
+  name=$(scutil --get LocalHostName 2>/dev/null) || return 1
+  printf 'http://%s.local:%s\n' "$name" "$OPEN_DOTS_PORT"
 }
 
 # The start script that is running Open Dots, if any.
@@ -116,7 +127,7 @@ client_stamp() {
 
 client_needs_build() {
   local stamp
-  [ -f "$ROOT/client/.next/BUILD_ID" ] || return 0
+  [ -f "$ROOT/client/.next/BUILD_ID" ] && [ -f "$ROOT/client/out/index.html" ] || return 0
   if stamp=$(client_stamp); then
     [ "$stamp" != "$(cat "$ROOT/client/.next/.open-dots-source" 2>/dev/null)" ]
     return
@@ -147,7 +158,7 @@ signin_url() {
   token=$(owner_token) || return 1
   [ -n "$token" ] || return 1
   response=$(curl -fsS -m 10 -X POST -H "Authorization: Bearer $token" \
-    "http://127.0.0.1:$API_PORT/api/v1/auth/signin-links" 2>/dev/null) || return 1
+    "http://127.0.0.1:$OPEN_DOTS_PORT/api/v1/auth/signin-links" 2>/dev/null) || return 1
   printf '%s\n' "$response" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p'
 }
 

@@ -129,7 +129,11 @@ class AuthenticationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get("/api/v1/chat/stream/test", headers={"Sec-Fetch-Site": "cross-site"})).status_code, 403)
 
     async def test_allowed_frontend_can_read_401_and_then_login(self):
-        origin = settings.CORS_ORIGINS[0]
+        # A frontend on another origin, as `npm run dev` is, once CORS_ORIGINS
+        # names it (nothing is trusted by default). The middleware keeps this list.
+        origin = "http://localhost:3000"
+        settings.CORS_ORIGINS.append(origin)
+        self.addCleanup(settings.CORS_ORIGINS.remove, origin)
         response = await self.client.get("/api/v1/bots", headers={"Origin": origin})
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.headers["access-control-allow-origin"], origin)

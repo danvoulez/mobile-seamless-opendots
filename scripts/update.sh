@@ -73,30 +73,37 @@ PY
   ls -1d "$BACKUPS"/*/ 2>/dev/null | sort -r | tail -n +6 | while IFS= read -r old; do rm -rf "$old"; done
 }
 
+# What a build of the web client leaves: .next (Next.js's own) and out (the
+# exported Mac page the server serves).
+BUILD_DIRS=".next out"
+
 # Install and build the checked-out version, keeping the previous build and
 # modules aside so going back is instant.
 prepare_version() {
-  rm -rf "$ROOT/client/.next.previous" "$ROOT/client/node_modules.previous"
+  local dir
+  for dir in $BUILD_DIRS node_modules; do rm -rf "$ROOT/client/$dir.previous"; done
   setup_server || return 1
   if [ -f "$ROOT/client/package-lock.json" ] && ! cmp -s "$ROOT/client/package-lock.json" "$ROOT/client/node_modules/.open-dots-lock"; then
     [ -d "$ROOT/client/node_modules" ] && mv "$ROOT/client/node_modules" "$ROOT/client/node_modules.previous"
   fi
   setup_client_modules || return 1
   if client_needs_build; then
-    [ -d "$ROOT/client/.next" ] && mv "$ROOT/client/.next" "$ROOT/client/.next.previous"
+    for dir in $BUILD_DIRS; do
+      [ -d "$ROOT/client/$dir" ] && mv "$ROOT/client/$dir" "$ROOT/client/$dir.previous"
+    done
     build_client || return 1
   fi
 }
 
 # Back to a version that worked, with the build and modules it had.
 restore_version() {  # commit
+  local dir
   git -C "$ROOT" checkout --quiet --force --detach "$1" || return 1
-  if [ -d "$ROOT/client/.next.previous" ]; then
-    rm -rf "$ROOT/client/.next" && mv "$ROOT/client/.next.previous" "$ROOT/client/.next"
-  fi
-  if [ -d "$ROOT/client/node_modules.previous" ]; then
-    rm -rf "$ROOT/client/node_modules" && mv "$ROOT/client/node_modules.previous" "$ROOT/client/node_modules"
-  fi
+  for dir in $BUILD_DIRS node_modules; do
+    if [ -d "$ROOT/client/$dir.previous" ]; then
+      rm -rf "${ROOT:?}/client/$dir" && mv "$ROOT/client/$dir.previous" "$ROOT/client/$dir"
+    fi
+  done
   setup_server && setup_client
 }
 
@@ -170,8 +177,9 @@ cmd_apply() {
 }
 
 cmd_confirm() {
+  local dir
   [ "$(status_field state)" = installed ] || return 0
-  rm -rf "$ROOT/client/.next.previous" "$ROOT/client/node_modules.previous"
+  for dir in $BUILD_DIRS node_modules; do rm -rf "$ROOT/client/$dir.previous"; done
   write_status "done" "$(status_field from)" "$(status_field to)" "Updated"
   say "Open Dots updated to $(status_field to | cut -c1-7)."
 }

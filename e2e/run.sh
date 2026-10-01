@@ -6,7 +6,8 @@
 #   e2e/run.sh phone both   some of them
 #
 # Needs the server's environment (server/.venv), the web client built
-# (client/.next), and `npm ci` in e2e/. Uses ports 8000, 3000 and 9100.
+# (client/out, which the server serves), and `npm ci` in e2e/. Uses ports
+# 4747 (E2E_PORT) and 9100.
 # Screenshots land in e2e/shots/ (SHOTS=… to change).
 set -euo pipefail
 
@@ -15,7 +16,7 @@ ROOT="$(dirname "$E2E")"
 PYTHON="${E2E_PYTHON:-$ROOT/server/.venv/bin/python}"
 WORK="$(mktemp -d)"
 PIDS=""
-export E2E_PYTHON="$PYTHON" E2E_TOKEN="${E2E_TOKEN:-e2e-owner-token}"
+export E2E_PYTHON="$PYTHON" E2E_TOKEN="${E2E_TOKEN:-e2e-owner-token}" E2E_PORT="${E2E_PORT:-4747}"
 # This project's cloud containers ship a Chromium; elsewhere Playwright's own is used.
 if [ -z "${CHROMIUM_PATH:-}" ] && [ -x /opt/pw-browsers/chromium ]; then export CHROMIUM_PATH=/opt/pw-browsers/chromium; fi
 
@@ -45,12 +46,10 @@ PIDS="$!"
 
 start_shared() {
   (cd "$ROOT/server" && DATA_DIR="$WORK/data" APP_AUTH_TOKEN="$E2E_TOKEN" WORKSPACE_ROOT="$ROOT" \
-    exec "$PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level warning) &
+    exec "$PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port "$E2E_PORT" --log-level warning) &
   PIDS="$PIDS $!"
-  (cd "$ROOT/client" && exec ./node_modules/.bin/next start -H 127.0.0.1 -p 3000) >/dev/null &
-  PIDS="$PIDS $!"
-  wait_for http://127.0.0.1:8000/api/v1/health
-  wait_for http://127.0.0.1:3000/
+  wait_for "http://127.0.0.1:$E2E_PORT/api/v1/health"
+  wait_for "http://127.0.0.1:$E2E_PORT/"
 }
 
 shared_running=0

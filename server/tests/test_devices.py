@@ -55,10 +55,10 @@ class DeviceLinkingTests(unittest.IsolatedAsyncioTestCase):
         return pairing, response
 
     async def test_pairing_link_and_qr_come_from_the_computer(self):
-        with patch.object(devices_router, "base_urls", return_value=[{"url": "http://studio.local:8000", "kind": "Bonjour name"}]):
+        with patch.object(devices_router, "base_urls", return_value=[{"url": "http://studio.local:4747", "kind": "Bonjour name"}]):
             pairing = (await self.mac.post("/api/v1/devices/pairing")).json()
         self.assertRegex(pairing["code"], r"^[A-Z2-9]{4}-[A-Z2-9]{4}$")
-        self.assertEqual(pairing["url"], f"http://studio.local:8000/m/?pair={pairing['code']}")
+        self.assertEqual(pairing["url"], f"http://studio.local:4747/m/?pair={pairing['code']}")
         self.assertEqual(len(pairing["qr"]["rows"]), pairing["qr"]["size"])
         self.assertFalse(pairing["reachable"])  # tests run with the loopback default
 
@@ -201,7 +201,7 @@ class MobileAppServingTests(unittest.IsolatedAsyncioTestCase):
         page = await self.client.get('/m/?pair="><script>alert(1)</script>')
         self.assertIn('href="/m/manifest.webmanifest"', page.text)
         self.assertNotIn("<script>alert", page.text)
-        redirect = await self.client.get("/?pair=ABCD-EFGH")
+        redirect = await self.client.get("/m?pair=ABCD-EFGH")
         self.assertEqual(redirect.headers["location"], "/m/?pair=ABCD-EFGH")
 
 

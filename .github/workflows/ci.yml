@@ -164,13 +164,14 @@ jobs:
         run: |
           git branch -f ci-install HEAD
           OPEN_DOTS_REPO="file://$GITHUB_WORKSPACE" UPDATE_CHANNEL=ci-install bash scripts/install.sh --yes --no-open
-          curl -fsS http://127.0.0.1:8000/api/v1/health
-          curl -fsS -o /dev/null http://127.0.0.1:3000
+          curl -fsS http://127.0.0.1:4747/api/v1/health
+          curl -fsS -o "$RUNNER_TEMP/mac-page.html" http://127.0.0.1:4747/
+          grep -q '<title>Open Dots' "$RUNNER_TEMP/mac-page.html"
           launchctl print "gui/$(id -u)/dev.opendots.open-dots" | head -20 || echo "(not running under launchd)"
           bash "$HOME/.open-dots/app/scripts/uninstall.sh" --yes --delete-data
           test ! -e "$HOME/.open-dots"
           test ! -e "$HOME/Library/LaunchAgents/dev.opendots.open-dots.plist"
-          ! curl -fsS -m 3 http://127.0.0.1:8000/api/v1/health
+          ! curl -fsS -m 3 http://127.0.0.1:4747/api/v1/health
 
   publish:
     name: Publish to stable

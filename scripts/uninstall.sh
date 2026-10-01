@@ -66,7 +66,7 @@ main() {
     for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
   fi
   if api_ready; then
-    warn "Something is still answering on port $API_PORT (another copy of Open Dots?). Stop it with Ctrl+C where it runs."
+    warn "Something is still answering on port $OPEN_DOTS_PORT (another copy of Open Dots?). Stop it with Ctrl+C where it runs."
   fi
   say "Stopped Open Dots."
 

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import httpx
 
+from app.config import settings
 from app.services.auth_service import AuthService, auth_service, SESSION_COOKIE
 
 try:
@@ -63,9 +64,15 @@ class AuthMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipIf(app is None, "FastAPI dependencies are not installed")
     async def test_unauthorized_responses_include_cors_headers(self):
-        transport = httpx.ASGITransport(app=app, client=("10.0.0.2", 43123))
-        async with httpx.AsyncClient(transport=transport, base_url="http://api.example") as client:
-            response = await client.get("/api/v1/models", headers={"Origin": "http://127.0.0.1:3000"})
+        # No origin is trusted by default; `npm run dev` adds its own like this.
+        # The CORS middleware keeps a reference to this list.
+        settings.CORS_ORIGINS.append("http://127.0.0.1:3000")
+        try:
+            transport = httpx.ASGITransport(app=app, client=("10.0.0.2", 43123))
+            async with httpx.AsyncClient(transport=transport, base_url="http://api.example") as client:
+                response = await client.get("/api/v1/models", headers={"Origin": "http://127.0.0.1:3000"})
+        finally:
+            settings.CORS_ORIGINS.remove("http://127.0.0.1:3000")
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://127.0.0.1:3000")
 

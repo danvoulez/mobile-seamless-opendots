@@ -42,6 +42,8 @@ Prefer to do it by hand? Clone the repository anywhere and run `./scripts/start-
 
 **Signing in.** On this Mac, `~/.open-dots/app/scripts/start-mac.sh --sign-in` opens Open Dots signed in (it makes a one-time link that works for 10 minutes). You can also paste the owner token from `~/.open-dots/.auth-token` into the sign-in form. The owner token is separate from your model provider key; never commit or share it. Browser sessions last 30 days, survive restarts and updates, and end when you sign out. Direct API clients can send the owner token as a Bearer credential.
 
+**From your other computers.** Open Dots answers on your local network at one address, `http://your-mac.local:4747` (the installer prints yours). Open it in Safari on another Mac and choose **File → Add to Dock**: it becomes an app with the Open Dots icon and its own window. Sign it in once with the owner token from `~/.open-dots/.auth-token` on the Mac that runs Open Dots; that app keeps its own sign-in for 30 days. Like the iPhone, it travels over plain HTTP on your network (see [On your Wi-Fi](#on-your-wi-fi)).
+
 **Your data** lives in `~/.open-dots`: the database, encrypted settings, linked devices, the owner token, and database backups taken before each update. Settings that should survive updates, such as `PUBLIC_URL` for a tunnel, go in `~/.open-dots/open-dots.env` as `KEY=value` lines.
 
 ### Updates
@@ -62,14 +64,14 @@ It stops Open Dots, removes it from your login items, and deletes the app. It as
 
 ### Develop
 
-For hot reload while you work on the code, run the API and the web client yourself:
+For hot reload while you work on the code, run the server and the web client yourself:
 
 ```bash
-cd server && python3 -m venv .venv && .venv/bin/pip install -r requirements.lock && .venv/bin/python run.py
+cd server && python3 -m venv .venv && .venv/bin/pip install -r requirements.lock && CORS_ORIGINS=http://localhost:3000 .venv/bin/python run.py
 cd client && npm ci && npm run dev    # in a second terminal
 ```
 
-The API is at `http://127.0.0.1:8000` (interactive docs at `/docs`); the web client at `http://127.0.0.1:3000`.
+The server is at `http://127.0.0.1:4747` (interactive docs at `/docs`); the hot-reloading web client at `http://localhost:3000`, which `CORS_ORIGINS` allows to use the server. Installed copies don't run Next.js: `next build` exports the Mac page to `client/out`, and the server serves it on its own address.
 
 ## Continue on iPhone
 
@@ -83,9 +85,9 @@ The [installer](#install-on-your-mac) sets this up. By hand, from the project fo
 ./scripts/start-mac.sh
 ```
 
-The first run creates the Python environment, installs and builds the web client, then opens `http://localhost:3000` signed in. Add your model provider under **Settings → Model provider**.
+The first run creates the Python environment, installs and builds the web client, then opens `http://localhost:4747` signed in. Add your model provider under **Settings → Model provider**.
 
-The script makes the API listen on your local network so the phone can reach it (the web client itself stays on the Mac), and it keeps the Mac from idle-sleeping while Open Dots runs. The display can still sleep; set `OPEN_DOTS_ALLOW_SLEEP=1` to allow system sleep too. If macOS asks whether Python may accept incoming connections, choose **Allow**.
+The script runs one process that serves the Mac page, the iPhone app and the API at one address, port 4747 (set `OPEN_DOTS_PORT` in `~/.open-dots/open-dots.env` to change it). It listens on your local network so your iPhone and your other computers can reach it, and it keeps the Mac from idle-sleeping while Open Dots runs. The display can still sleep; set `OPEN_DOTS_ALLOW_SLEEP=1` to allow system sleep too. If macOS asks whether Python may accept incoming connections, choose **Allow**.
 
 The first time, the script offers to keep Open Dots running in the background, so it is always there for your iPhone, even after a restart. You can turn that on or off later with `--install-login-item` and `--remove-login-item`.
 
@@ -117,13 +119,13 @@ Settings that should survive restarts go in `~/.open-dots/open-dots.env`, one `K
 
 #### On your Wi-Fi
 
-The phone reaches the Mac at its Bonjour name (`your-mac.local:8000`) over plain HTTP, like other local-network apps, so anyone on the same network could read that traffic. Use a network you trust.
+The phone reaches the Mac at its Bonjour name (`your-mac.local:4747`) over plain HTTP, like other local-network apps, so anyone on the same network could read that traffic. The same goes for the Mac page opened from another computer. Use a network you trust.
 
 #### From anywhere: Cloudflare Tunnel
 
 A [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) gives your Mac a stable HTTPS address, such as `dots.example.com`, without opening ports on your router. You need a Cloudflare account and a domain on Cloudflare.
 
-1. In the Cloudflare dashboard, create a tunnel and give it a public hostname, for example `dots.example.com`, that points to `http://localhost:8000`.
+1. In the Cloudflare dashboard, create a tunnel and give it a public hostname, for example `dots.example.com`, that points to `http://localhost:4747`.
 2. On the Mac, run `brew install cloudflared`, then the macOS install command the dashboard shows. The tunnel then starts with the Mac.
 3. Give Open Dots that address, and keep it off the local network:
 
@@ -141,7 +143,7 @@ Before you rely on it:
 
 #### From anywhere, encrypted end to end: Tailscale
 
-Put both devices on [Tailscale](https://tailscale.com/kb/1242/tailscale-serve) and let it serve Open Dots over HTTPS, for example with `tailscale serve --bg 8000`. Then set `PUBLIC_URL` to the address it shows (such as `https://your-mac.your-tailnet.ts.net`) and `HOST=127.0.0.1` in `~/.open-dots/open-dots.env`. Traffic is encrypted between your own devices, and only devices on your tailnet can reach the Mac.
+Put both devices on [Tailscale](https://tailscale.com/kb/1242/tailscale-serve) and let it serve Open Dots over HTTPS, for example with `tailscale serve --bg 4747`. Then set `PUBLIC_URL` to the address it shows (such as `https://your-mac.your-tailnet.ts.net`) and `HOST=127.0.0.1` in `~/.open-dots/open-dots.env`. Traffic is encrypted between your own devices, and only devices on your tailnet can reach the Mac.
 
 ## Model provider
 
@@ -167,12 +169,14 @@ Set `model_ids` to the service's supported chat model IDs and `default_model` to
 | `APP_AUTH_TOKEN` | generated in `DATA_DIR` | Server-side owner credential for sign-in and direct API access |
 | `WORKSPACE_ROOT` | project root | Directory boundary for approved workspace actions |
 | `COMPUTER_PROVIDER` | `fake` | Computer provider: `fake`, `docker`, or `remote` |
-| `HOST` / `PORT` | `127.0.0.1` / `8000` | API bind address (`scripts/start-mac.sh` uses `0.0.0.0` so a linked iPhone can connect) |
+| `OPEN_DOTS_PORT` | `4747` | The one port `scripts/start-mac.sh` serves the Mac page, the iPhone app and the API on |
+| `HOST` / `PORT` | `127.0.0.1` / `4747` | Bind address of a server started by hand (`scripts/start-mac.sh` uses `0.0.0.0` and `OPEN_DOTS_PORT`, so your iPhone and other computers can connect) |
+| `CORS_ORIGINS` | empty | Other origins allowed to use the API from a browser, such as `http://localhost:3000` for `npm run dev`; pages this server serves are always allowed |
 | `PUBLIC_URL` | detected | Address linked phones use to reach this computer, e.g. a Cloudflare Tunnel or Tailscale HTTPS name; defaults to the Bonjour name or LAN address |
 | `PAIRING_CODE_TTL_SECONDS` | `600` | How long a Continue on iPhone code stays valid |
 | `DEVICE_SESSION_MAX_AGE` | 400 days | Lifetime of a linked device's cookie; unlinking revokes it at once |
 
-For non-loopback access, set `APP_AUTH_TOKEN` only on the server, use HTTPS with `AUTH_COOKIE_SECURE=1`, and set a narrow `CORS_ORIGINS` list. Configure the public API address with `NEXT_PUBLIC_API_URL`, and sign in through the form; do not embed credentials in `NEXT_PUBLIC_*` variables. Keep the UI and API on the same site so the browser can send the session cookie. The built-in session store targets one API process; sessions are not shared between workers or instances.
+The Mac page, the iPhone app and the API share one origin, so the browser sends the session cookie and no CORS is involved. Beyond your own network, use HTTPS (a tunnel, above) with `AUTH_COOKIE_SECURE=1`, set `APP_AUTH_TOKEN` only on the server, and sign in through the form. `NEXT_PUBLIC_API_URL` is only for a page served from elsewhere, as `npm run dev` is; never put credentials in `NEXT_PUBLIC_*` variables. The built-in session store targets one API process; sessions are not shared between workers or instances.
 
 If you previously built with `NEXT_PUBLIC_API_TOKEN`, rotate the owner credential, remove that variable, and rebuild/redeploy the client. Existing public assets may contain the old credential. Old cookies containing the master token are no longer accepted; users must sign in again.
 
@@ -201,8 +205,9 @@ For a remote computer service, configure `COMPUTER_PROVIDER=remote` and the `COM
 ## Architecture
 
 ```text
-Mac browser (Next.js) ── HTTP + live events (SSE) ─────────┐
-iPhone ── JSON-RPC over one WebSocket (Wi-Fi or tunnel) ───┴── FastAPI API
+Mac page (any computer) ── HTTP + live events (SSE) ───────┐
+iPhone ── JSON-RPC over one WebSocket (Wi-Fi or tunnel) ───┴── FastAPI, one address (:4747)
+                                                                ├── the Mac page (client/out) and the iPhone app (/m/)
                                                                 ├── conversations + background turns
                                                                 ├── SQLite + encrypted settings
                                                                 ├── configurable inference adapter
@@ -212,7 +217,7 @@ iPhone ── JSON-RPC over one WebSocket (Wi-Fi or tunnel) ───┴── F
                                                                       └── fake / Docker / remote computer
 ```
 
-The main code areas are `client/` (Next.js UI), `mobile/` (the iPhone app, served by the API at `/m/` with no build step), `server/app/routers/` (HTTP API), `server/app/services/` (providers, persistence, background turns, live events, device linking, approvals, and tools), and `runtime/` (Docker computer driver).
+The main code areas are `client/` (the Mac page: Next.js, exported to plain files the API serves), `mobile/` (the iPhone app, served by the API at `/m/` with no build step), `server/app/routers/` (HTTP API), `server/app/services/` (providers, persistence, background turns, live events, device linking, approvals, and tools), and `runtime/` (Docker computer driver).
 
 ## How changes reach your Mac
 
