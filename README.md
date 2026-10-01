@@ -180,6 +180,17 @@ The Mac page, the iPhone app and the API share one origin, so the browser sends 
 
 If you previously built with `NEXT_PUBLIC_API_TOKEN`, rotate the owner credential, remove that variable, and rebuild/redeploy the client. Existing public assets may contain the old credential. Old cookies containing the master token are no longer accepted; users must sign in again.
 
+### What each reply sends, and what it costs
+
+Each message you send is one model call; titles are made locally and commands like `/search` run first and ride along in that same call. The call is built for prompt caching ([server/app/services/model_context.py](server/app/services/model_context.py)):
+
+- The assistant's instructions (its prompt, what it's for, a few notes about Open Dots) come first and don't change from one reply to the next. The time and any command result go at the very end, with your latest message.
+- Long conversations keep their latest 30 to 60 messages; older ones are left out 30 at a time, so the beginning of the request stays the same for many replies.
+- A photo is sent again for your next few messages, then replaced by a short note. Photos are reduced to 1600 px before upload.
+- With Vercel AI Gateway, requests ask for `caching: "auto"` (Anthropic models only cache when asked; OpenAI, Google and DeepSeek cache by themselves) and carry the conversation as `x-session-affinity`.
+
+Every reply's tokens, how many came from the cache, and its price (Vercel AI Gateway reports one) are recorded in the **Audit trail**, which shows the last 30 days' total per model at the top.
+
 ## Web search
 
 `/search <query>` in chat runs a governed, read-only web lookup through the [You.com MCP server](https://you.com/docs/build-with-agents/mcp-server) and hands the results to the assistant as action context, so it can answer with current information.

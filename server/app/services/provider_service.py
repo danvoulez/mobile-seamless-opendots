@@ -1,9 +1,44 @@
 import json
 import asyncio
 import httpx
-from typing import AsyncGenerator, Dict, Any, List
+from typing import AsyncGenerator, Dict, Any, List, Optional
+from urllib.parse import urlsplit
 from app.config import settings
 from app.services.storage_service import storage_service
+
+
+def is_vercel_ai_gateway(base_url: str) -> bool:
+    return urlsplit(base_url).hostname == "ai-gateway.vercel.sh"
+
+
+def _count(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def usage_from_response(response: Any) -> Optional[Dict[str, Any]]:
+    """Tokens of a finished Responses reply, and its cost when Vercel AI
+    Gateway reports one (provider_metadata.gateway.cost, in US dollars)."""
+    if not isinstance(response, dict):
+        return None
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    metadata = response.get("provider_metadata") if isinstance(response.get("provider_metadata"), dict) else {}
+    gateway = metadata.get("gateway") if isinstance(metadata.get("gateway"), dict) else {}
+    if not usage and not gateway.get("cost"):
+        return None
+    try:
+        cost = float(gateway["cost"]) if gateway.get("cost") not in (None, "") else None
+    except (TypeError, ValueError):
+        cost = None
+    return {
+        "input_tokens": _count(usage.get("input_tokens")),
+        "cached_tokens": _count((usage.get("input_tokens_details") or {}).get("cached_tokens")),
+        "output_tokens": _count(usage.get("output_tokens")),
+        "reasoning_tokens": _count((usage.get("output_tokens_details") or {}).get("reasoning_tokens")),
+        "cost_usd": cost,
+    }
 
 class ModelProviderService:
     def __init__(self):
@@ -13,7 +48,8 @@ class ModelProviderService:
         self,
         model: str,
         messages: List[Dict[str, str]],
-        system_prompt: str = ""
+        system_prompt: str = "",
+        session_id: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Submit chat requests to the configured inference endpoint.
@@ -42,7 +78,7 @@ class ModelProviderService:
         if app_settings.get("model_api_wire_api") == "responses":
             async for event in self._stream_responses(
                 base_url, api_key, model, messages, system_prompt,
-                app_settings.get("model_api_headers") or {},
+                app_settings.get("model_api_headers") or {}, session_id,
             ):
                 yield event
             return
@@ -211,7 +247,7 @@ class ModelProviderService:
         yield {"type": "content.delta", "delta": error_display}
         yield {"type": "turn.completed", "ok": False}
 
-    async def _stream_responses(self, base_url, api_key, model, messages, system_prompt, extra_headers):
+    async def _stream_responses(self, base_url, api_key, model, messages, system_prompt, extra_headers, session_id=None):
         inputs = []
         for message in messages:
             role = message.get("role", "user")
@@ -225,8 +261,16 @@ class ModelProviderService:
 
         headers = {**extra_headers, "Authorization": f"Bearer {api_key}",
                    "Content-Type": "application/json", "Accept": "text/event-stream"}
+        if session_id:
+            # Lets the provider send one conversation's requests where its cache is.
+            headers["x-session-affinity"] = session_id
         body = {"model": model, "input": inputs, "instructions": system_prompt,
                 "stream": True, "store": False}
+        if is_vercel_ai_gateway(base_url):
+            # Anthropic, MiniMax and Alibaba only cache when asked; the Gateway
+            # then marks the request (other providers cache by themselves).
+            # Other services would reject this field.
+            body["caching"] = "auto"
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream("POST", f"{base_url}/responses", json=body, headers=headers) as response:
@@ -248,7 +292,11 @@ class ModelProviderService:
                             elif event_type == "response.refusal.delta":
                                 yield {"type": "content.delta", "delta": event.get("delta", "")}
                             elif event_type == "response.completed":
-                                yield {"type": "turn.completed", "ok": True}
+                                completed = {"type": "turn.completed", "ok": True}
+                                usage = usage_from_response(event.get("response"))
+                                if usage:
+                                    completed["usage"] = usage
+                                yield completed
                                 return
                             elif event_type in {"response.failed", "response.incomplete", "error"}:
                                 raise RuntimeError(f"Responses API ended with {event_type}.")

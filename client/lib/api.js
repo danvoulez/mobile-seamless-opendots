@@ -161,9 +161,41 @@ export async function sendMessage(threadId, botId, text, model = 'gpt-5-mini', i
   }
 }
 
+// Photos go to the model with every reply that still needs them; models see
+// about 1600 px at most anyway, so a bigger one only costs time. Same rule as
+// the iPhone app (mobile/app.js, downscale).
+const MAX_IMAGE_SIDE = 1600;
+
+async function downscaleImage(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = url;
+    });
+    const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+    if (scale === 1 && file.size < 1_500_000 && /^image\/(jpeg|png|webp)$/.test(file.type)) return file;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve, reject) => canvas.toBlob(
+      (result) => (result ? resolve(result) : reject(new Error('Could not prepare the image.'))),
+      'image/jpeg', 0.85,
+    ));
+    return new File([blob], `${(file.name || 'image').replace(/\.[^.]+$/, '')}.jpg`, { type: 'image/jpeg' });
+  } catch {
+    return file; // a format this browser can't draw: send it as it is
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export async function uploadImage(file) {
   const formData = new FormData();
-  formData.append('file', file);
+  formData.append('file', await downscaleImage(file));
   const res = await apiFetch(`${API_BASE_URL}/upload`, {
     method: 'POST',
     body: formData,
@@ -207,6 +239,13 @@ export async function authorizeConnector(slug) {
 export async function disconnectConnector(slug) {
   const res = await apiFetch(`${API_BASE_URL}/connectors/${slug}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`Failed to disconnect ${slug}`);
+  return res.json();
+}
+
+// What the model calls of the last `days` days used and cost (see routers/audit.py).
+export async function fetchModelUsage(days = 30) {
+  const res = await apiFetch(`${API_BASE_URL}/audit/usage?days=${encodeURIComponent(days)}`);
+  if (!res.ok) throw new Error('Could not load model usage.');
   return res.json();
 }
 

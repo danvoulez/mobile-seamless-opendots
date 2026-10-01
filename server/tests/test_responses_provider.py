@@ -18,7 +18,7 @@ from app.services.auth_service import auth_service
 
 
 class ResponsesProviderTests(unittest.IsolatedAsyncioTestCase):
-    async def run_provider(self, response, messages=None, wire_api="responses"):
+    async def run_provider(self, response, messages=None, wire_api="responses", base_url="https://provider.test/v1", session_id=None):
         self.requests = []
 
         def handler(request):
@@ -27,7 +27,7 @@ class ResponsesProviderTests(unittest.IsolatedAsyncioTestCase):
 
         config = {
             "model_api_key": "test-secret",
-            "model_api_base_url": "https://provider.test/v1",
+            "model_api_base_url": base_url,
             "model_api_wire_api": wire_api,
             "model_api_headers": {"x-provider-auth": "header-secret"},
         }
@@ -35,7 +35,7 @@ class ResponsesProviderTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.services.provider_service.storage_service.get_settings", return_value=config), \
              patch("app.services.provider_service.httpx.AsyncClient", return_value=client):
             return [event async for event in ModelProviderService().stream_chat_completion(
-                "exact.model-id", messages or [{"role": "user", "content": "Hello"}], "Be helpful",
+                "exact.model-id", messages or [{"role": "user", "content": "Hello"}], "Be helpful", session_id=session_id,
             )]
 
     @staticmethod
@@ -70,6 +70,26 @@ class ResponsesProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["instructions"], "Be helpful")
         self.assertFalse(body["store"])
         self.assertTrue(body["stream"])
+        self.assertNotIn("caching", body)  # only Vercel AI Gateway knows it
+        self.assertNotIn("x-session-affinity", request.headers)
+
+    async def test_vercel_ai_gateway_is_asked_to_cache_and_reports_usage_and_cost(self):
+        events = await self.run_provider(self.sse(
+            {"type": "response.output_text.delta", "delta": "Hi"},
+            {"type": "response.completed", "response": {
+                "usage": {
+                    "input_tokens": 1200, "input_tokens_details": {"cached_tokens": 1000},
+                    "output_tokens": 40, "output_tokens_details": {"reasoning_tokens": 10},
+                },
+                "provider_metadata": {"gateway": {"cost": "0.0045405"}},
+            }},
+        ), base_url="https://ai-gateway.vercel.sh/v1", session_id="thr-1")
+        request = self.requests[0]
+        self.assertEqual(json.loads(request.content)["caching"], "auto")
+        self.assertEqual(request.headers["x-session-affinity"], "thr-1")
+        self.assertEqual(events[-1], {"type": "turn.completed", "ok": True, "usage": {
+            "input_tokens": 1200, "cached_tokens": 1000, "output_tokens": 40, "reasoning_tokens": 10, "cost_usd": 0.0045405,
+        }})
 
     async def test_http_error_does_not_expose_upstream_secrets(self):
         events = await self.run_provider(httpx.Response(401, text="test-secret header-secret"))
@@ -148,7 +168,10 @@ class ChatStreamTests(unittest.IsolatedAsyncioTestCase):
                 events = [json.loads(line[5:]) for line in response.text.splitlines() if line.startswith("data:")]
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("Test persona", captured["system_prompt"])
-                self.assertEqual(captured["messages"], [{"role": "user", "content": "Hello", "image_url": None}])
+                self.assertEqual(len(captured["messages"]), 1)
+                # The person's words, then this turn's context (the time) at the end.
+                self.assertTrue(captured["messages"][0]["content"].startswith("Hello\n\n---\nFrom Open Dots"))
+                self.assertEqual(captured["session_id"], "chat-test")
                 self.assertEqual(events[-1]["type"], "turn.completed")
                 self.assertEqual(events[-1]["ok"], ok)
                 self.assertEqual(events[0]["model"], "exact.model-id")

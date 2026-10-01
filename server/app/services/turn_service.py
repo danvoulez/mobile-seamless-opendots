@@ -22,6 +22,7 @@ from app.services.action_gateway import (
 )
 from app.services.connector_actions import ConnectorCommandError, parse_connector_command
 from app.services.event_bus import EventBus, event_bus
+from app.services.model_context import assistant_instructions, model_messages, with_turn_context
 from app.services.provider_service import provider_service
 from app.services.search_actions import SearchCommandError, parse_search_command
 from app.services.storage_service import StorageService, local_now, storage_service
@@ -208,20 +209,8 @@ class TurnService:
             self.publish_thread(state.thread_id)
 
     async def _run_turn(self, state: TurnState, bot: Optional[Dict[str, Any]]) -> None:
-        history = self.storage.get_messages(thread_id=state.thread_id)
-        raw_prompt = bot["system_prompt"] if bot else "You are a helpful AI assistant."
-        current_time_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-        system_prompt = f"Current Date & Time: {current_time_str}.\n\n{raw_prompt}"
-
-        formatted_history = [
-            {
-                "role": "user" if m["sender"] == "user" else "assistant",
-                "content": m.get("text", ""),
-                "image_url": m.get("image_url"),
-            }
-            for m in history
-            if m.get("sender") in ("user", "bot") and not m.get("is_error")
-        ]
+        stored = self.storage.get_messages(thread_id=state.thread_id)
+        messages = model_messages(stored)
 
         self._emit(state, {
             "type": "turn.started",
@@ -230,15 +219,16 @@ class TurnService:
             "model": state.model,
         })
 
-        last_user_text = formatted_history[-1]["content"] if formatted_history else ""
-        tool_context = await self._run_action(state, last_user_text)
-        provider_prompt = f"{system_prompt}\n\n{tool_context}" if tool_context else system_prompt
+        latest = next((m for m in reversed(stored) if m.get("sender") == "user"), None)
+        action_note = await self._run_action(state, (latest or {}).get("text") or "")
 
         ok = False
+        usage = None
         async for event in self.provider.stream_chat_completion(
             model=state.model,
-            messages=formatted_history,
-            system_prompt=provider_prompt,
+            messages=with_turn_context(messages, datetime.now().astimezone(), action_note),
+            system_prompt=assistant_instructions(bot),
+            session_id=state.thread_id,
         ):
             if event["type"] == "content.delta":
                 offset = len(state.text)
@@ -251,9 +241,10 @@ class TurnService:
                 })
             elif event["type"] == "turn.completed":
                 ok = event.get("ok", True)
-        self._finish(state, ok)
+                usage = event.get("usage")
+        self._finish(state, ok, usage)
 
-    def _finish(self, state: TurnState, ok: bool) -> None:
+    def _finish(self, state: TurnState, ok: bool, usage: Optional[Dict[str, Any]] = None) -> None:
         # Failed replies are kept (marked as errors, and left out of the model
         # context) so every device shows the same conversation.
         message = {
@@ -267,6 +258,17 @@ class TurnService:
             "item_type": "assistant_text" if ok else "assistant_error",
             "is_error": not ok,
         }
+        if usage:
+            message["usage"] = usage
+            # Every model call is billed, so each one goes in the audit trail,
+            # where the spending summary is added up (routers/audit.py).
+            self.storage.add_audit_event({
+                "event": "model.reply",
+                "thread_id": state.thread_id,
+                "bot_id": state.bot_id,
+                "model": state.model,
+                **usage,
+            })
         self.storage.add_message(message)
         thread = self.storage.get_thread(state.thread_id)
         if thread:

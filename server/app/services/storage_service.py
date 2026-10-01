@@ -570,6 +570,19 @@ class StorageService:
             if isinstance((payload := self._decode_payload(row[0])), dict)
         ]
 
+    def get_audit_events_since(self, created_at: str, event: str) -> List[Dict[str, Any]]:
+        """Every audit event of one kind recorded at or after `created_at` (UTC ISO)."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM audit_events WHERE owner_id = ? AND created_at >= ? ORDER BY id",
+                (self.owner_id, created_at),
+            ).fetchall()
+        return [
+            payload
+            for row in rows
+            if isinstance((payload := self._decode_payload(row[0])), dict) and payload.get("event") == event
+        ]
+
     def add_audit_event(self, event: Dict[str, Any]):
         if not isinstance(event, dict):
             return

@@ -2,12 +2,55 @@
 
 import React, { useEffect, useState } from 'react';
 import { FiAlertCircle, FiClock, FiRefreshCw, FiShield } from 'react-icons/fi';
-import { fetchAuditEvents } from '../lib/api';
+import { fetchAuditEvents, fetchModelUsage } from '../lib/api';
 
 function formatTimestamp(value) {
   if (!value) return '—';
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function formatUsd(value) {
+  if (!value) return '$0';
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
+function formatTokens(value) {
+  if (!value) return '0';
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
+}
+
+// Share of the input that came from the provider's cache: billed at a fraction.
+function cachedShare(item) {
+  return item.input_tokens ? Math.round((100 * (item.cached_tokens || 0)) / item.input_tokens) : 0;
+}
+
+function UsageSummary({ usage }) {
+  if (!usage?.replies) return null;
+  return (
+    <div className="mx-6 mt-4 rounded-2xl border border-[#1e1e22] bg-[#0d0d10] px-4 py-3.5">
+      <div className="flex items-baseline justify-between gap-4">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Model calls · last {usage.days} days</p>
+        <p className="text-lg font-semibold text-white">{formatUsd(usage.cost_usd)}</p>
+      </div>
+      <p className="mt-1 text-[11px] text-zinc-400">
+        {usage.replies} replies · {formatTokens(usage.input_tokens)} tokens in ({cachedShare(usage)}% from cache) · {formatTokens(usage.output_tokens)} out
+        {usage.replies_without_cost > 0 && <span className="text-zinc-600"> · {usage.replies_without_cost} without a price from the provider</span>}
+      </p>
+      <div className="mt-2.5 space-y-1">
+        {usage.models.slice(0, 5).map((model) => (
+          <div key={model.model} className="flex items-center justify-between gap-4 text-[11px]">
+            <span className="truncate text-zinc-300">{model.model}</span>
+            <span className="flex-shrink-0 text-zinc-500">
+              {model.replies} · {cachedShare(model)}% cached · <span className="text-zinc-300">{formatUsd(model.cost_usd)}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function eventTone(event) {
@@ -22,6 +65,7 @@ function eventTone(event) {
 
 export default function AuditPanel() {
   const [events, setEvents] = useState([]);
+  const [usage, setUsage] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -29,7 +73,9 @@ export default function AuditPanel() {
     setLoading(true);
     setError('');
     try {
-      setEvents(await fetchAuditEvents(200));
+      const [latest, spent] = await Promise.all([fetchAuditEvents(200), fetchModelUsage(30).catch(() => null)]);
+      setEvents(latest);
+      setUsage(spent);
     } catch (err) {
       setError(err.message || 'Could not load audit events');
     } finally {
@@ -52,7 +98,7 @@ export default function AuditPanel() {
             <h2 className="text-sm font-bold tracking-wide">Audit Trail</h2>
           </div>
           <p className="text-[11px] text-zinc-500 mt-0.5">
-            Local record of approvals, workspace tools, and connector actions.
+            Local record of model calls and their cost, approvals, workspace tools, and connector actions.
           </p>
         </div>
         <button
@@ -64,6 +110,8 @@ export default function AuditPanel() {
           <FiRefreshCw className={loading ? 'animate-spin' : ''} />
         </button>
       </div>
+
+      <UsageSummary usage={usage} />
 
       {error && (
         <div className="mx-6 mt-4 rounded-xl border border-rose-500/20 bg-rose-500/[0.07] px-4 py-3 text-xs text-rose-300 flex items-center gap-2">
@@ -96,12 +144,19 @@ export default function AuditPanel() {
                           {event}
                         </span>
                         {item.tool && <span className="text-xs text-zinc-300 truncate">{item.tool}</span>}
+                        {item.model && <span className="text-xs text-zinc-300 truncate">{item.model}</span>}
                         {item.connector && <span className="text-xs text-zinc-300 truncate">{item.connector}</span>}
                       </div>
                       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-zinc-600">
                         {item.request_id && <span>request: {item.request_id}</span>}
                         {item.thread_id && <span>thread: {item.thread_id}</span>}
                         {typeof item.removed === 'number' && <span>removed: {item.removed}</span>}
+                        {event === 'model.reply' && (
+                          <span>
+                            {formatTokens(item.input_tokens)} in ({cachedShare(item)}% cached) · {formatTokens(item.output_tokens)} out
+                            {typeof item.cost_usd === 'number' && <> · <span className="text-zinc-400">{formatUsd(item.cost_usd)}</span></>}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <time className="flex-shrink-0 text-[10px] text-zinc-600">{formatTimestamp(item.created_at)}</time>

@@ -144,7 +144,8 @@ class ThreadApiTests(unittest.IsolatedAsyncioTestCase):
         messages = self.storage.get_messages(thread_id=thread["id"])
         self.assertTrue(messages[1]["is_error"])
         sent = self.provider.calls[-1]["messages"]
-        self.assertEqual([m["content"] for m in sent], ["One", "Two"])
+        # What the person wrote; this turn's context follows a "---" line.
+        self.assertEqual([m["content"].split("\n\n---\n")[0] for m in sent], ["One", "Two"])
 
     async def test_approval_is_shared_and_resolved_from_any_client(self):
         thread = await self.new_thread()
