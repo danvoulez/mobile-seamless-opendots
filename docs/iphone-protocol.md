@@ -95,7 +95,7 @@ its `threadId`.
 | `message.created` | `message` | Includes `client_id` for messages you sent |
 | `turn.started` | `turnId`, `botMsgId`, `model` | A reply began |
 | `content.delta` | `botMsgId`, `delta`, `offset` | `offset` is where `delta` starts in the reply text |
-| `request.opened` | `requestId`, `tool`, `summary`, `arguments`, `always?` | Approval needed. `always` (coding assistants) lists what **Always** would allow for the rest of the chat; offer it only when present |
+| `request.opened` | `requestId`, `tool`, `summary`, `arguments`, `always?` | Approval needed. `always` (coding assistants) lists what **Always** would allow from then on, in every chat about the same project folder; offer it only when present, and say that |
 | `request.resolved` | `requestId`, `decision` | `allow`, `always`, `deny` or `expired` |
 | `tool.started`, `tool.completed`, `tool.failed`, `tool.denied`, `tool.expired` | `tool`, `requestId?`, `action?`, `result?`, `error?` | One step per `requestId`: a later event updates the step, and an approval with the same `requestId` belongs to that step. The `turn` snapshot keeps the latest 30 steps in `tools`. Coding assistants' steps are named `code.<tool>` (`code.bash`, `code.edit`, …) |
 | `turn.completed` | `botMsgId`, `ok`, `message` | The stored reply; `ok: false` marks an error reply |

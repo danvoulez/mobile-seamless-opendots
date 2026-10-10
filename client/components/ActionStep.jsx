@@ -74,7 +74,7 @@ export default function ActionStep({ approval, event, preview, last, onRespond }
                 type="button"
                 disabled={isSubmitting}
                 onClick={() => answer('always')}
-                title={`Don't ask again in this chat for: ${approval.always.join(', ')}`}
+                title={`Don't ask again in this project, in any chat: ${approval.always.join(', ')}`}
                 className="h-7 px-3.5 rounded-full border border-white/[0.07] bg-white/[0.03] hover:bg-white/[0.055] text-zinc-300 text-[11px] font-semibold transition disabled:opacity-50"
               >
                 Always
@@ -93,7 +93,7 @@ export default function ActionStep({ approval, event, preview, last, onRespond }
           </div>
         )}
         {kind === 'ask' && approval.always?.length > 0 && (
-          <p className="text-[11px] text-zinc-500 break-words">Always allows: {approval.always.join(', ')}</p>
+          <p className="text-[11px] text-zinc-500 break-words">Always: allowed from now on in this project, in every chat: {approval.always.join(', ')}</p>
         )}
         {event?.result && (
           <details className="mt-0.5">

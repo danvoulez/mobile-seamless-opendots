@@ -917,12 +917,12 @@ function stepItem(key, { approval, event, preview }) {
           ? h('div', { class: 'step-actions' },
             h('button', { class: 'btn-deny', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'deny') }, 'Deny'),
             approval.always?.length
-              ? h('button', { class: 'btn-deny', type: 'button', disabled: busy, title: `Don't ask again in this chat for: ${approval.always.join(', ')}`, onclick: () => respond(approval.requestId, 'always') }, 'Always')
+              ? h('button', { class: 'btn-deny', type: 'button', disabled: busy, title: `Don't ask again in this project, in any chat: ${approval.always.join(', ')}`, onclick: () => respond(approval.requestId, 'always') }, 'Always')
               : null,
             h('button', { class: 'btn-allow', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'allow') }, icon('check', 'icon icon-sm'), 'Allow'))
           : null,
         kind === 'ask' && approval.always?.length
-          ? h('p', { class: 'step-meta' }, `Always allows: ${approval.always.join(', ')}`)
+          ? h('p', { class: 'step-meta' }, `Always: allowed from now on in this project, in every chat: ${approval.always.join(', ')}`)
           : null,
         resultDetails(event))),
   };

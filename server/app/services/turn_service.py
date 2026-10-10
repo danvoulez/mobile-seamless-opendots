@@ -12,6 +12,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -22,7 +23,9 @@ from app.services.action_gateway import (
     action_gateway,
 )
 from app.services.approval_broker import approval_broker
-from app.services.coding_agent import CodingAgentError, coding_agent, model_ref, project_dir_for
+from app.services.coding_agent import (
+    CodingAgentError, coding_agent, coding_instructions, model_ref, project_dir_for, project_plugins,
+)
 from app.services.connector_actions import ConnectorCommandError, parse_connector_command
 from app.services.event_bus import EventBus, event_bus
 from app.services.model_context import assistant_instructions, model_messages, with_turn_context
@@ -447,6 +450,13 @@ class CodingTurn:
         app_settings = self.turns.storage.get_settings()
         try:
             self.directory = str(project_dir_for(self.bot))
+            plugins = project_plugins(Path(self.directory))
+            if plugins:
+                raise CodingAgentError(
+                    "This project has OpenCode plugins, which would run code on this computer without asking: "
+                    + ", ".join(str(plugin) for plugin in plugins[:5])
+                    + ". Remove them (or choose another project folder), then send your message again."
+                )
             await self.agent.ensure_running()
             self.session_id = await self._session()
         except (CodingAgentError, OSError) as exc:
@@ -458,7 +468,7 @@ class CodingTurn:
         try:
             await self.agent.prompt(
                 self.session_id, self.directory, latest.get("text") or "", latest.get("image_url"),
-                model_ref(state.model, app_settings),
+                model_ref(state.model, app_settings), coding_instructions(self.bot, Path(self.directory)),
             )
             await self._follow(events)
         except asyncio.CancelledError:

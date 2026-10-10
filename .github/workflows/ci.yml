@@ -108,6 +108,7 @@ jobs:
           cache-dependency-path: |
             client/package-lock.json
             e2e/package-lock.json
+            agent/package-lock.json
       - name: Server environment
         run: python -m venv server/.venv && server/.venv/bin/pip install -r server/requirements.lock
       - name: Build the web client
@@ -118,6 +119,11 @@ jobs:
         run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
       - name: Run the suites
         run: e2e/run.sh
+      - name: OpenCode (the pinned version)
+        working-directory: agent
+        run: npm ci --no-audit --no-fund
+      - name: Coding assistant on the real OpenCode
+        run: server/.venv/bin/python e2e/coding.py
       - name: Keep the screenshots
         if: always()
         uses: actions/upload-artifact@v4

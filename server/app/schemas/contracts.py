@@ -73,8 +73,9 @@ class TurnRequest(BaseModel):
 
 class ApprovalDecision(BaseModel):
     request_id: str
-    # "always": allow, and let a coding assistant do the same again in this
-    # conversation without asking. Elsewhere it counts as "allow".
+    # "always": allow, and let a coding assistant do the same again without
+    # asking, from now on, in every chat about the same project folder
+    # (OpenCode saves it for the project). Elsewhere it counts as "allow".
     action: Literal["allow", "always", "deny"]
 
 

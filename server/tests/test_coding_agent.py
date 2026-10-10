@@ -8,7 +8,10 @@ from unittest.mock import patch
 from app.config import settings
 from app.services import coding_agent as coding_module
 from app.services.approval_broker import approval_broker
-from app.services.coding_agent import CodingAgentError, build_config, model_ref, validate_project_dir
+from app.services.coding_agent import (
+    PERMISSIONS, CodingAgentError, agent_environment, build_config, coding_instructions, enforced_config, model_ref,
+    project_plugins, validate_project_dir,
+)
 from app.services.event_bus import EventBus
 from app.services.storage_service import StorageService
 from app.services.turn_service import TurnService, tool_subject
@@ -66,8 +69,9 @@ class FakeAgent:
         self.created += 1
         return SESSION
 
-    async def prompt(self, session_id, directory, text, image_url, model):
-        self.prompts.append({"text": text, "image_url": image_url, "model": model, "directory": directory})
+    async def prompt(self, session_id, directory, text, image_url, model, system=""):
+        self.prompts.append({"text": text, "image_url": image_url, "model": model, "directory": directory,
+                             "system": system})
         asyncio.get_running_loop().create_task(self._play())
 
     async def _play(self):
@@ -151,6 +155,7 @@ class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.agent.prompts[0]["text"], "run the tests")
         self.assertEqual(self.agent.prompts[0]["directory"], str(self.project))
         self.assertEqual(self.agent.prompts[0]["model"], {"providerID": "vercel", "modelID": "moonshotai/kimi-k2"})
+        self.assertIn("approves them on one of their devices", self.agent.prompts[0]["system"])
 
         message = self.storage.get_last_message("thr-code")
         self.assertEqual(message["text"], "Running the tests.\n\nAll green.")
@@ -224,6 +229,18 @@ class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.turns.wait("thr-code"), 5)
         self.assertEqual(self.storage.get_last_message("thr-code")["text"], "Whole answer")
 
+    async def test_a_project_with_plugins_is_refused_before_opencode_sees_it(self):
+        (self.project / ".opencode" / "plugin").mkdir(parents=True)
+        (self.project / ".opencode" / "plugin" / "x.js").write_text("export const X = async () => ({})")
+        self.say("hi")
+        self.turns.start("thr-code", "bot-code")
+        await asyncio.wait_for(self.turns.wait("thr-code"), 5)
+        message = self.storage.get_last_message("thr-code")
+        self.assertTrue(message["is_error"])
+        self.assertIn("plugins", message["text"])
+        self.assertEqual(self.agent.prompts, [])
+        self.assertEqual(self.agent.created, 0)
+
     async def test_cancelled_reply_stops_opencode(self):
         self.agent.script = [assistant("msg_1"), "WAIT_FOR_REPLY"]
         self.say("hi")
@@ -236,17 +253,21 @@ class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def test_vercel_uses_opencodes_own_provider_and_keeps_the_key_out_of_the_file(self):
+    def test_vercel_uses_opencodes_own_provider_and_keeps_the_key_out_of_the_environment(self):
         prepared = build_config({"model_api_base_url": "https://ai-gateway.vercel.sh/v1", "model_api_key": "vck_secret",
                                  "model_ids": ["moonshotai/kimi-k2"], "default_model": "anthropic/claude-sonnet-4.5"})
         config = prepared["config"]
-        self.assertEqual(prepared["env"], {"AI_GATEWAY_API_KEY": "vck_secret"})
-        self.assertNotIn("vck_secret", json.dumps(config))
+        # Commands OpenCode runs inherit its environment: the key lives in the 0600 file instead.
+        self.assertEqual(prepared["env"], {})
+        self.assertEqual(config["provider"]["vercel"]["options"]["apiKey"], "vck_secret")
         self.assertEqual(config["model"], "vercel/anthropic/claude-sonnet-4.5")
         self.assertEqual(config["small_model"], config["model"])
         self.assertEqual(set(config["provider"]["vercel"]["models"]), {"moonshotai/kimi-k2", "anthropic/claude-sonnet-4.5"})
         self.assertEqual(config["permission"]["*"], "ask")
         self.assertEqual(config["permission"]["read"]["*.env"], "deny")
+        # Subagent sessions and questions would wait for answers no device can give.
+        self.assertEqual(config["permission"]["task"], "deny")
+        self.assertEqual(config["permission"]["question"], "deny")
         self.assertFalse(config["autoupdate"])
         self.assertEqual(config["share"], "disabled")
 
@@ -256,12 +277,25 @@ class ConfigTests(unittest.TestCase):
         provider = prepared["config"]["provider"]["opendots"]
         self.assertEqual(provider["npm"], "@ai-sdk/openai-compatible")
         self.assertEqual(provider["options"]["baseURL"], "https://llm.example.com/v1")
-        self.assertEqual(provider["options"]["apiKey"], "{env:OPEN_DOTS_MODEL_API_KEY}")
-        self.assertEqual(provider["options"]["headers"], {"X-Team": "{env:OPEN_DOTS_HEADER_0}"})
-        self.assertEqual(prepared["env"], {"OPEN_DOTS_MODEL_API_KEY": "sk", "OPEN_DOTS_HEADER_0": "t1"})
-        self.assertNotIn("t1", json.dumps(prepared["config"]))
+        self.assertEqual(provider["options"]["apiKey"], "sk")
+        self.assertEqual(provider["options"]["headers"], {"X-Team": "t1"})
+        self.assertEqual(prepared["env"], {})
         self.assertEqual(model_ref("m1", {"model_api_base_url": "https://llm.example.com/v1"}),
                          {"providerID": "opendots", "modelID": "m1"})
+
+    def test_opencode_gets_none_of_open_dots_secrets(self):
+        env = agent_environment({"PATH": "/usr/bin", "HOME": "/Users/dan", "LC_ALL": "pt_PT.UTF-8",
+                                 "APP_AUTH_TOKEN": "owner", "MODEL_API_KEY": "sk", "APP_ENCRYPTION_KEY": "k",
+                                 "COMPOSIO_API_KEY": "c", "YDC_API_KEY": "y", "AI_GATEWAY_API_KEY": "v"})
+        self.assertEqual(env, {"PATH": "/usr/bin", "HOME": "/Users/dan", "LC_ALL": "pt_PT.UTF-8"})
+
+    def test_the_assistants_instructions_go_to_opencode(self):
+        text = coding_instructions({"system_prompt": "You write Rust.", "role": "crates"})
+        self.assertTrue(text.startswith("You write Rust."))
+        self.assertIn("What you're for: crates.", text)
+        self.assertIn("approves them on one of their devices", text)
+        # The same assistant always gives the same text, so it stays in the provider's cache.
+        self.assertEqual(text, coding_instructions({"system_prompt": "You write Rust.", "role": "crates"}))
 
     def test_a_provider_is_required(self):
         with patch.object(settings, "MODEL_API_BASE_URL", ""), patch.object(settings, "MODEL_API_KEY", ""):
@@ -272,6 +306,47 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(tool_subject("edit", {"filePath": "/x/app.py"}), "edit: /x/app.py")
         self.assertEqual(tool_subject("bash", {"command": "ls\n  -la"}), "bash: ls -la")
         self.assertEqual(tool_subject("todowrite", {}), "todowrite")
+
+
+class ProjectSafetyTests(unittest.TestCase):
+    """A project folder may come from anywhere (a cloned repo): it can give the
+    model instructions, but it can't turn approvals off or run code."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name).resolve()
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_every_permission_that_acts_is_named(self):
+        # OpenCode merges configurations key by key: "*" alone would leave room.
+        for key in ("bash", "edit", "webfetch", "websearch", "external_directory"):
+            self.assertEqual(PERMISSIONS[key], "ask", key)
+        self.assertEqual(enforced_config()["agent"]["build"]["permission"], PERMISSIONS)
+        self.assertNotIn("apiKey", json.dumps(enforced_config()))
+
+    def test_plugins_in_the_project_or_above_are_found(self):
+        project = self.root / "repo" / "app"
+        project.mkdir(parents=True)
+        self.assertEqual(project_plugins(project), [])
+        (self.root / "repo" / ".opencode" / "plugins").mkdir(parents=True)
+        plugin = self.root / "repo" / ".opencode" / "plugins" / "x.ts"
+        plugin.write_text("export const X = async () => ({})")
+        (self.root / "repo" / ".opencode" / "plugins" / "notes.md").write_text("not code")
+        self.assertEqual(project_plugins(project), [plugin])
+
+    def test_the_projects_agents_md_goes_with_the_instructions(self):
+        (self.root / "AGENTS.md").write_text("Use tabs.")
+        text = coding_instructions({"system_prompt": "You write Go."}, self.root)
+        self.assertTrue(text.startswith("You write Go."))
+        self.assertIn(f"Instructions from: {self.root / 'AGENTS.md'}\nUse tabs.", text)
+        (self.root / "AGENTS.md").write_text("x" * 40_000)
+        self.assertIn("(The rest of AGENTS.md is left out.)", coding_instructions({}, self.root))
+
+    def test_claude_md_when_there_is_no_agents_md(self):
+        (self.root / "CLAUDE.md").write_text("Run make test.")
+        self.assertIn("Run make test.", coding_instructions({}, self.root))
 
 
 class ProjectFolderTests(unittest.TestCase):

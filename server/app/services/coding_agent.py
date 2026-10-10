@@ -50,11 +50,100 @@ PERMISSIONS: Dict[str, Any] = {
     "grep": "allow",
     "list": "allow",
     "lsp": "allow",
-    "todoread": "allow",
+    "skill": "allow",
     "todowrite": "allow",
+    # Every permission that acts is named, not left to "*": OpenCode merges
+    # configurations key by key, so an unnamed one could come from elsewhere.
+    "bash": "ask",
+    "edit": "ask",
+    "webfetch": "ask",
+    "websearch": "ask",
     "external_directory": "ask",
     "doom_loop": "ask",
+    # Subagents work in sessions of their own, whose approvals no device would
+    # see, and they multiply what a reply costs. The question tool waits for
+    # an answer through a channel Open Dots doesn't offer; the assistant asks
+    # in its reply instead.
+    "task": "deny",
+    "question": "deny",
 }
+
+# Instruction files a project may keep for coding agents, the first one found
+# in the project folder. Open Dots reads it and sends it with the assistant's
+# instructions (OpenCode's own project configuration is off, and that turns
+# these off too). Only text for the model: it can't change approvals or run anything.
+PROJECT_INSTRUCTIONS = ("AGENTS.md", "CLAUDE.md")
+PROJECT_INSTRUCTIONS_MAX = 32_000  # characters; a huge file would be paid for on every model call
+
+# What OpenCode (and the commands it runs) may see of Open Dots' environment:
+# enough to find programs and behave normally, none of Open Dots' secrets.
+ENV_KEPT = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "LANG", "TZ",
+            "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+            "https_proxy", "http_proxy", "no_proxy")
+
+CODING_NOTES = (
+    "The person talks to you through Open Dots, from their computer or their "
+    "iPhone; your replies are shown as Markdown. Answer in the language the "
+    "person writes in. Actions that change something wait until the person "
+    "approves them on one of their devices; if one is rejected, don't retry "
+    "it the same way."
+)
+
+
+def enforced_config() -> Dict[str, Any]:
+    """What no project may override: the approval rules, for every agent OpenCode runs."""
+    return {
+        "permission": PERMISSIONS,
+        "agent": {name: {"permission": PERMISSIONS} for name in ("build", "plan", "general", "explore")},
+    }
+
+
+def project_instructions(directory: Path) -> str:
+    for name in PROJECT_INSTRUCTIONS:
+        path = directory / name
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if text:
+            if len(text) > PROJECT_INSTRUCTIONS_MAX:
+                text = text[:PROJECT_INSTRUCTIONS_MAX] + f"\n\n(The rest of {name} is left out.)"
+            return f"Instructions from: {path}\n{text}"
+    return ""
+
+
+def coding_instructions(bot: Dict[str, Any], directory: Optional[Path] = None) -> str:
+    """The assistant's instructions and the project's own, added to OpenCode's.
+    The same for every reply while neither changes, so it stays in the cache."""
+    parts = [(bot.get("system_prompt") or "").strip()]
+    role = (bot.get("role") or "").strip()
+    if role and role.lower() not in parts[0].lower():
+        parts.append(f"What you're for: {role}.")
+    parts.append(CODING_NOTES)
+    if directory is not None:
+        parts.append(project_instructions(directory))
+    return "\n\n".join(part for part in parts if part)
+
+
+def project_plugins(directory: Path) -> List[Path]:
+    """OpenCode plugins in the project or a folder above it.
+
+    OpenCode loads `.opencode/plugin(s)/*.js|ts` from those folders whatever
+    its settings say, and a plugin is code that runs inside OpenCode, before
+    any approval. Open Dots won't start a reply where one would load.
+    """
+    found: List[Path] = []
+    for folder in (directory, *directory.parents):
+        for kind in ("plugin", "plugins"):
+            plugin_dir = folder / ".opencode" / kind
+            if plugin_dir.is_dir():
+                found.extend(sorted(p for p in plugin_dir.iterdir() if p.suffix in (".js", ".ts")))
+    return found
+
+
+def agent_environment(base: Dict[str, str]) -> Dict[str, str]:
+    """The environment OpenCode starts with: no Open Dots credentials, no provider key."""
+    return {key: value for key, value in base.items() if key in ENV_KEPT or key.startswith("LC_")}
 
 
 class CodingAgentError(Exception):
@@ -73,8 +162,10 @@ def provider_id_for(base_url: str) -> str:
 def build_config(app_settings: Dict[str, Any]) -> Dict[str, Any]:
     """OpenCode's configuration and environment for the provider in Settings.
 
-    Returns {"config": ..., "env": ...}. Secrets go in the environment, which
-    only the OpenCode process receives; the file holds `{env:...}` references.
+    Returns {"config": ..., "env": ...}. The key and headers go in the file,
+    which only this user can read (0600, outside every project), and not in
+    OpenCode's environment: commands it runs inherit that environment, so a
+    key there would be one `echo` away.
     """
     base_url = (app_settings.get("model_api_base_url") or settings.MODEL_API_BASE_URL).rstrip("/")
     api_key = app_settings.get("model_api_key") or settings.MODEL_API_KEY
@@ -88,15 +179,12 @@ def build_config(app_settings: Dict[str, Any]) -> Dict[str, Any]:
 
     env: Dict[str, str] = {}
     if provider == VERCEL_PROVIDER_ID:
-        env["AI_GATEWAY_API_KEY"] = api_key
-        providers = {VERCEL_PROVIDER_ID: {"models": {model: {} for model in model_ids}}}
+        providers = {VERCEL_PROVIDER_ID: {"options": {"apiKey": api_key}, "models": {model: {} for model in model_ids}}}
     else:
-        env["OPEN_DOTS_MODEL_API_KEY"] = api_key
-        options: Dict[str, Any] = {"baseURL": base_url, "apiKey": "{env:OPEN_DOTS_MODEL_API_KEY}"}
+        options: Dict[str, Any] = {"baseURL": base_url, "apiKey": api_key}
         headers = app_settings.get("model_api_headers") or {}
         if headers:
-            options["headers"] = {name: f"{{env:OPEN_DOTS_HEADER_{index}}}" for index, name in enumerate(headers)}
-            env.update({f"OPEN_DOTS_HEADER_{index}": value for index, value in enumerate(headers.values())})
+            options["headers"] = dict(headers)
         providers = {
             PROVIDER_ID: {
                 "npm": "@ai-sdk/openai-compatible",
@@ -217,7 +305,7 @@ class OpenCodeAgent:
         port = _free_port()
         self.password = secrets.token_urlsafe(32)
         env = {
-            **os.environ,
+            **agent_environment(dict(os.environ)),
             **prepared["env"],
             # OpenCode's own data, separate from any OpenCode the person uses in a terminal.
             "XDG_DATA_HOME": str(self.home / "data"),
@@ -225,6 +313,18 @@ class OpenCodeAgent:
             "XDG_CACHE_HOME": str(self.home / "cache"),
             "XDG_STATE_HOME": str(self.home / "state"),
             "OPENCODE_CONFIG": str(config_path),
+            # The approval rules again, as inline configuration: OpenCode ranks it
+            # above everything, so a project's own opencode.json (say, in a repo
+            # you cloned) can't turn approvals off. No secrets in it: commands
+            # OpenCode runs inherit this environment.
+            "OPENCODE_CONFIG_CONTENT": json.dumps(enforced_config()),
+            "OPENCODE_PERMISSION": json.dumps(PERMISSIONS),
+            # A project's opencode.json and .opencode/ folder (agents, plugins,
+            # custom tools) would run with your approvals bypassed, or run code
+            # just by opening the folder. Its AGENTS.md (instructions) still applies.
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+            # Plugins are code; a project's would run inside OpenCode, unasked.
+            "OPENCODE_PURE": "1",
             "OPENCODE_SERVER_USERNAME": SERVER_USER,
             "OPENCODE_SERVER_PASSWORD": self.password,
         }
@@ -401,16 +501,20 @@ class OpenCodeAgent:
         return session["id"]
 
     async def prompt(self, session_id: str, directory: str, text: str, image_url: Optional[str],
-                     model: Dict[str, str]) -> None:
+                     model: Dict[str, str], system: str = "") -> None:
         parts: List[Dict[str, Any]] = []
         if text:
             parts.append({"type": "text", "text": text})
-        if image_url and image_url.startswith("data:"):
-            mime = image_url[5:].split(";", 1)[0] or "image/png"
+        if image_url and image_url.startswith(("data:", "https://")):
+            # A photo is a data URL, or an https address where the provider hosts uploads.
+            mime = (image_url[5:].split(";", 1)[0] if image_url.startswith("data:") else "") or "image/jpeg"
             parts.append({"type": "file", "mime": mime, "url": image_url, "filename": "photo"})
         if not parts:
             parts.append({"type": "text", "text": "(empty message)"})
-        await self._request("POST", f"/session/{session_id}/prompt_async", directory, {"parts": parts, "model": model})
+        body: Dict[str, Any] = {"parts": parts, "model": model}
+        if system:
+            body["system"] = system
+        await self._request("POST", f"/session/{session_id}/prompt_async", directory, body)
 
     async def abort(self, session_id: str, directory: str) -> None:
         await self._request("POST", f"/session/{session_id}/abort", directory)
