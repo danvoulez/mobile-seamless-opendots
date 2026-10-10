@@ -87,6 +87,7 @@ prepare_version() {
     [ -d "$ROOT/client/node_modules" ] && mv "$ROOT/client/node_modules" "$ROOT/client/node_modules.previous"
   fi
   setup_client_modules || return 1
+  setup_agent
   if client_needs_build; then
     for dir in $BUILD_DIRS; do
       [ -d "$ROOT/client/$dir" ] && mv "$ROOT/client/$dir" "$ROOT/client/$dir.previous"

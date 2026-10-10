@@ -98,7 +98,10 @@ export async function createBot(botData) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(botData),
   });
-  if (!res.ok) throw new Error('Failed to create bot');
+  if (!res.ok) {
+    const detail = await res.json().then((body) => body?.detail).catch(() => null);
+    throw new Error(typeof detail === 'string' ? detail : 'Failed to create bot');
+  }
   return res.json();
 }
 

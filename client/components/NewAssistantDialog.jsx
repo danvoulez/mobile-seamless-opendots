@@ -1,7 +1,9 @@
 'use client';
 
-// The card that creates an assistant: its name, what it's for, and the model it
-// calls. Creating it on the server is the caller's job (onCreate).
+// The card that creates an assistant: its name, what it's for, the model it
+// calls, and whether it chats or codes (a coding assistant runs on OpenCode in
+// a project folder on this computer). Creating it on the server is the
+// caller's job (onCreate).
 
 import React, { useEffect, useRef, useState } from 'react';
 import { FiChevronDown } from 'react-icons/fi';
@@ -19,6 +21,8 @@ export default function NewAssistantDialog({ isOpen, onClose, onCreate, models, 
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
   const [model, setModel] = useState('');
+  const [engine, setEngine] = useState('model');
+  const [projectDir, setProjectDir] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -30,6 +34,8 @@ export default function NewAssistantDialog({ isOpen, onClose, onCreate, models, 
     setName('');
     setRole('');
     setModel(initialModel(models, recentIds, defaultModel));
+    setEngine('model');
+    setProjectDir('');
     setMenuOpen(false);
     setError('');
     setTimeout(() => nameRef.current?.focus(), 0);
@@ -57,7 +63,7 @@ export default function NewAssistantDialog({ isOpen, onClose, onCreate, models, 
     setSaving(true);
     setError('');
     try {
-      await onCreate({ name: name.trim(), role: role.trim(), model });
+      await onCreate({ name: name.trim(), role: role.trim(), model, engine, projectDir: projectDir.trim() });
     } catch (err) {
       setError(err.message || "Couldn't create the assistant.");
       setSaving(false);
@@ -98,6 +104,48 @@ export default function NewAssistantDialog({ isOpen, onClose, onCreate, models, 
             className="w-full bg-[#141417] border border-[#2c2c33] rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500/60"
           />
         </div>
+
+        <div className="space-y-1.5">
+          <span className="block text-[11px] font-medium text-zinc-400">Kind</span>
+          <div className="grid grid-cols-2 gap-1 p-1 bg-[#141417] border border-[#2c2c33] rounded-lg" role="radiogroup" aria-label="Kind">
+            {[['model', 'Chat'], ['opencode', 'Coding']].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={engine === value}
+                onClick={() => setEngine(value)}
+                className={`py-1.5 rounded-md text-xs font-medium transition ${
+                  engine === value ? 'bg-[#26262c] text-white' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {engine === 'opencode' && (
+            <p className="text-[11px] text-zinc-500">
+              Reads, edits and runs code with OpenCode on this computer. It asks before changing files or running commands.
+            </p>
+          )}
+        </div>
+
+        {engine === 'opencode' && (
+          <div className="space-y-1.5">
+            <label htmlFor="assistant-project" className="block text-[11px] font-medium text-zinc-400">
+              Project folder <span className="text-zinc-600">(optional)</span>
+            </label>
+            <input
+              id="assistant-project"
+              value={projectDir}
+              onChange={(event) => setProjectDir(event.target.value)}
+              placeholder="~/Projects/my-app"
+              spellCheck={false}
+              className="w-full bg-[#141417] border border-[#2c2c33] rounded-lg px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500/60"
+            />
+            <p className="text-[11px] text-zinc-600">Empty: a new folder of its own in Open Dots’ projects folder.</p>
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <span className="block text-[11px] font-medium text-zinc-400">Model</span>

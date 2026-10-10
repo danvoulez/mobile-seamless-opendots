@@ -16,6 +16,7 @@ def _now() -> str:
 class PendingApproval:
     request_id: str
     future: asyncio.Future
+    allows_always: bool = False
 
 
 class ApprovalBroker:
@@ -30,11 +31,13 @@ class ApprovalBroker:
         bot_id: str,
         call: Any,
         request_id: Optional[str] = None,
+        always: Optional[list] = None,
     ) -> Dict[str, Any]:
         request_id = request_id or f"req-{uuid.uuid4().hex[:10]}"
         loop = asyncio.get_running_loop()
         future = loop.create_future()
-        self.pending[request_id] = PendingApproval(request_id, future)
+        # `always`: what "Always allow" would allow from then on (coding assistants).
+        self.pending[request_id] = PendingApproval(request_id, future, allows_always=bool(always))
 
         approval = {
             "request_id": request_id,
@@ -46,6 +49,8 @@ class ApprovalBroker:
             "status": "pending",
             "created_at": _now(),
         }
+        if always:
+            approval["always"] = list(always)
         storage_service.add_approval(approval)
         storage_service.add_audit_event({
             "event": "approval.opened",
@@ -86,6 +91,8 @@ class ApprovalBroker:
         pending = self.pending.get(request_id)
         if not pending or pending.future.done():
             return False
+        if action == "always" and not pending.allows_always:
+            action = "allow"
 
         pending.future.set_result(action)
         storage_service.update_approval(request_id, {

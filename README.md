@@ -191,6 +191,23 @@ Each message you send is one model call; titles are made locally and commands li
 
 Every reply's tokens, how many came from the cache, and its price (Vercel AI Gateway reports one) are recorded in the **Audit trail**, which shows the last 30 days' total per model at the top.
 
+## Coding assistants (OpenCode)
+
+An assistant can be a **coding assistant**: choose **Coding** when you create it on the Mac, and optionally give it a project folder (for example `~/Projects/my-app`; left empty, it gets a folder of its own in `~/.open-dots/projects`). Its replies come from [OpenCode](https://opencode.ai), which reads and edits files, runs commands, searches the code and keeps a to-do list, in that folder, on your Mac. You follow and continue it from the Mac or the iPhone like any other chat.
+
+- **It asks first.** Reading and searching run freely; editing files, running commands, fetching from the web or touching anything outside the project folder waits for **Allow** on any of your devices. **Always** allows the same kind of step (for example `npm *`) for the rest of that chat. `.env` files stay unreadable. An approval nobody answers within two minutes counts as denied.
+- **Same model provider.** OpenCode uses the provider from **Settings → Model provider** and the assistant's model, with no separate key. With Vercel AI Gateway it uses OpenCode's own Vercel provider; any other service is used as an OpenAI-compatible API (Chat Completions at the same base URL).
+- **One OpenCode for everything.** Open Dots starts a single `opencode serve` on loopback, with a password only Open Dots knows, the first time a coding assistant replies, and stops it when Open Dots stops. Its data (sessions, settings, log) lives in `~/.open-dots/opencode`, apart from any OpenCode you use in a terminal; the project's own `AGENTS.md` and `opencode.json` still apply.
+- **Context survives restarts.** Each chat keeps its OpenCode session, so after an update or a restart the assistant still knows the conversation.
+- **Costs are counted.** Every model call OpenCode makes for a reply goes into that reply's tokens and price in the **Audit trail** (prices come from OpenCode's model catalog; a model it doesn't know is counted without a price).
+- **The version is tested.** `agent/package-lock.json` pins OpenCode; installs and updates use exactly that version, and a new one reaches your Mac only through CI like any other change. To move to a newer OpenCode, change the version in `agent/package.json` and run `npm install` in `agent/`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PROJECTS_DIR` | `~/.open-dots/projects` | Where coding assistants without a project folder work |
+| `OPENCODE_DIR` | `~/.open-dots/opencode` | OpenCode's data, configuration and log |
+| `OPENCODE_BIN` | `agent/node_modules/.bin/opencode` | The OpenCode to run (falls back to `opencode` on the `PATH`) |
+
 ## Web search
 
 `/search <query>` in chat runs a governed, read-only web lookup through the [You.com MCP server](https://you.com/docs/build-with-agents/mcp-server) and hands the results to the assistant as action context, so it can answer with current information.
@@ -223,6 +240,7 @@ iPhone ── JSON-RPC over one WebSocket (Wi-Fi or tunnel) ───┴── F
                                                                 ├── SQLite + encrypted settings
                                                                 ├── configurable inference adapter
                                                                 ├── Composio connector adapter
+                                                                ├── coding assistants → opencode serve (loopback)
                                                                 └── action gateway + approvals + audit
                                                                       ├── confined workspace tools
                                                                       └── fake / Docker / remote computer
@@ -271,7 +289,7 @@ e2e/update-flow.sh                                              # install → up
 - SQLite is local state; the only backups are the five kept before updates, in `~/.open-dots/backups`.
 - Inference supports the original prediction API and Responses-compatible services; Chat Completions and a generic provider plugin interface are not implemented.
 - The computer runtime is opt-in and is not a hardened security boundary for arbitrary web content.
-- Connector actions are intentionally narrow; arbitrary tool discovery and writes are not implemented.
+- Connector actions are intentionally narrow; arbitrary tool discovery and writes are not implemented. Coding assistants (OpenCode) are the exception, confined to their project folder and approvals.
 - The iPhone app has no push notifications yet; it catches up when you open it. iOS allows notifications for Home Screen web apps only over HTTPS (for example through Cloudflare Tunnel), and they aren't implemented. There is no native desktop app, durable memory service, or scheduled routine engine.
 
 ## Contributing

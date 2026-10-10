@@ -13,6 +13,10 @@ class Bot(BaseModel):
     accent_color: str = "cyan"
     system_prompt: str
     tools: List[str] = Field(default_factory=list)
+    # "model": replies come straight from the model. "opencode": a coding
+    # assistant; OpenCode works in project_dir (services/coding_agent.py).
+    engine: Literal["model", "opencode"] = "model"
+    project_dir: str = ""
     pinned: bool = False
     unread_count: int = 0
     created_at: str
@@ -69,7 +73,9 @@ class TurnRequest(BaseModel):
 
 class ApprovalDecision(BaseModel):
     request_id: str
-    action: Literal["allow", "deny"]
+    # "always": allow, and let a coding assistant do the same again in this
+    # conversation without asking. Elsewhere it counts as "allow".
+    action: Literal["allow", "always", "deny"]
 
 
 class ActionRequest(BaseModel):

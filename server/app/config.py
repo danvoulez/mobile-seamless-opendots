@@ -85,6 +85,20 @@ class Settings:
     # commits. Checks run while Open Dots is started by scripts/start-mac.sh.
     UPDATE_CHANNEL: str = os.getenv("UPDATE_CHANNEL", "stable").strip() or "stable"
     UPDATE_CHECK_MINUTES: float = float(os.getenv("UPDATE_CHECK_MINUTES", "5"))
+    # Coding assistants run on OpenCode (services/coding_agent.py). The tested
+    # version is installed next to the app from agent/package-lock.json.
+    OPENCODE_BIN: str = os.getenv(
+        "OPENCODE_BIN",
+        str(Path(__file__).resolve().parents[2] / "agent" / "node_modules" / ".bin" / "opencode"),
+    ).strip()
+    OPENCODE_DIR: Path = Path(
+        os.getenv("OPENCODE_DIR", str(DATA_DIR / "opencode"))
+    ).expanduser().resolve()
+    # Where a coding assistant works when it isn't given a folder of its own.
+    PROJECTS_DIR: Path = Path(
+        os.getenv("PROJECTS_DIR", str(DATA_DIR / "projects"))
+    ).expanduser().resolve()
+    OPENCODE_START_TIMEOUT: float = float(os.getenv("OPENCODE_START_TIMEOUT", "30"))
 
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.routers import auth, bots, models, chat, approvals, upload, settings as settings_router, connectors, audit, computers, threads, events, devices, rpc, system
 from app.services.auth_service import auth_service
+from app.services.coding_agent import coding_agent
 from app.services.computer_provider import computer_provider
 from app.services.device_service import device_may_access, device_service, format_code, normalize_code
 from app.services.host_info import device_label, device_noun
@@ -26,6 +27,7 @@ async def lifespan(_app: FastAPI):
     finally:
         if checker:
             checker.cancel()
+        await coding_agent.stop()
 
 
 app = FastAPI(

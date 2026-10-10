@@ -69,7 +69,7 @@ Other plain HTTP calls: `POST /api/v1/upload` (multipart photo, returns
 | `threads.create` | `bot_id`, `title?` | Chat summary |
 | `threads.rename` | `thread_id`, `title` | Chat summary |
 | `messages.send` | `thread_id` **or** `bot_id`, `text`, `image_url?`, `model?`, `client_id?` | `{thread, message, turn, duplicate?}` |
-| `approvals.respond` | `request_id`, `action` (`allow` or `deny`) | `{request_id, action}` |
+| `approvals.respond` | `request_id`, `action` (`allow`, `always` or `deny`) | `{request_id, action}` |
 
 `messages.send` with a `bot_id` and no `thread_id` starts a new chat and
 sends its first message in one call.
@@ -95,9 +95,9 @@ its `threadId`.
 | `message.created` | `message` | Includes `client_id` for messages you sent |
 | `turn.started` | `turnId`, `botMsgId`, `model` | A reply began |
 | `content.delta` | `botMsgId`, `delta`, `offset` | `offset` is where `delta` starts in the reply text |
-| `request.opened` | `requestId`, `tool`, `summary`, `arguments` | Approval needed |
-| `request.resolved` | `requestId`, `decision` | `allow`, `deny` or `expired` |
-| `tool.started`, `tool.completed`, `tool.failed`, `tool.denied`, `tool.expired` | `tool`, `requestId?`, `action?`, `result?`, `error?` | One step per `requestId`: a later event updates the step. The `turn` snapshot keeps the latest 30 steps in `tools` |
+| `request.opened` | `requestId`, `tool`, `summary`, `arguments`, `always?` | Approval needed. `always` (coding assistants) lists what **Always** would allow for the rest of the chat; offer it only when present |
+| `request.resolved` | `requestId`, `decision` | `allow`, `always`, `deny` or `expired` |
+| `tool.started`, `tool.completed`, `tool.failed`, `tool.denied`, `tool.expired` | `tool`, `requestId?`, `action?`, `result?`, `error?` | One step per `requestId`: a later event updates the step, and an approval with the same `requestId` belongs to that step. The `turn` snapshot keeps the latest 30 steps in `tools`. Coding assistants' steps are named `code.<tool>` (`code.bash`, `code.edit`, …) |
 | `turn.completed` | `botMsgId`, `ok`, `message` | The stored reply; `ok: false` marks an error reply |
 | `device.linked`, `device.unlinked` | `device` / `deviceId` | |
 

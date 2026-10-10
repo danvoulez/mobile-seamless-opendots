@@ -6,7 +6,16 @@ from pydantic import ValidationError
 from app.services.computer_provider import computer_provider, ComputerProviderError
 
 from app.schemas.contracts import Bot
+from app.services.coding_agent import validate_project_dir
 from app.services.storage_service import storage_service
+
+
+def _checked_project_dir(data: Dict[str, Any]) -> None:
+    if "project_dir" in data:
+        try:
+            data["project_dir"] = validate_project_dir(str(data["project_dir"] or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 router = APIRouter(prefix="/api/v1/bots", tags=["bots"])
 
@@ -16,12 +25,13 @@ async def get_bots():
 
 @router.post("", response_model=Bot)
 async def create_bot(bot_data: Dict[str, Any]):
-    allowed = {"name", "role", "description", "avatar", "model", "accent_color", "system_prompt", "tools", "pinned", "unread_count"}
+    allowed = {"name", "role", "description", "avatar", "model", "accent_color", "system_prompt", "tools", "engine", "project_dir", "pinned", "unread_count"}
     unknown = set(bot_data) - allowed
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unsupported bot fields: {', '.join(sorted(unknown))}")
     if "id" in bot_data:
         raise HTTPException(status_code=422, detail="Bot ids are assigned by the server.")
+    _checked_project_dir(bot_data)
     new_id = f"bot-{uuid.uuid4().hex[:6]}"
     bot = {
         "id": new_id,
@@ -33,6 +43,8 @@ async def create_bot(bot_data: Dict[str, Any]):
         "accent_color": bot_data.get("accent_color", "#3b82f6"),
         "system_prompt": bot_data.get("system_prompt", "You are a helpful AI assistant."),
         "tools": bot_data.get("tools", []),
+        "engine": bot_data.get("engine", "model"),
+        "project_dir": bot_data.get("project_dir", ""),
         "pinned": False,
         "unread_count": 0,
         "created_at": datetime.now().isoformat()
@@ -48,10 +60,11 @@ async def create_bot(bot_data: Dict[str, Any]):
 
 @router.put("/{bot_id}", response_model=Bot)
 async def update_bot(bot_id: str, updates: Dict[str, Any]):
-    allowed = {"name", "role", "description", "avatar", "model", "accent_color", "system_prompt", "tools", "pinned", "unread_count"}
+    allowed = {"name", "role", "description", "avatar", "model", "accent_color", "system_prompt", "tools", "engine", "project_dir", "pinned", "unread_count"}
     unknown = set(updates) - allowed
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unsupported bot fields: {', '.join(sorted(unknown))}")
+    _checked_project_dir(updates)
     bots = storage_service.get_bots()
     for i, b in enumerate(bots):
         if b["id"] == bot_id:
