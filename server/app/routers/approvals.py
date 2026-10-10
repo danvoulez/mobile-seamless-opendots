@@ -11,7 +11,7 @@ async def respond_approval(decision: ApprovalDecision):
     if not resolved:
         raise HTTPException(status_code=404, detail="Approval request is no longer pending")
 
-    action_text = "Allowed" if decision.action == "allow" else "Denied"
+    action_text = "Denied" if decision.action == "deny" else "Allowed"
     return {
         "status": "ok",
         "request_id": decision.request_id,

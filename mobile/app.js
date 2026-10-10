@@ -867,6 +867,8 @@ function messageItem(message) {
 function toolLabel(name) {
   const [family, action = ''] = String(name || '').split('.');
   if (family === 'connector') return action.startsWith('github') ? 'GitHub' : 'Apps';
+  // Coding assistants' steps (OpenCode's tools).
+  if (family === 'code') return { bash: 'Terminal', edit: 'Edit', write: 'Edit', patch: 'Edit', multiedit: 'Edit', read: 'Files', list: 'Files', glob: 'Files', grep: 'Files', webfetch: 'Web', websearch: 'Web search', task: 'Subtask' }[action] || 'Code';
   return { workspace: 'Files', search: 'Web search', computer: 'Computer' }[family] || 'Action';
 }
 
@@ -875,7 +877,7 @@ function toolLabel(name) {
 // quick run of steps rather than a stack of boxes.
 function stepKind(approval, event) {
   if (approval?.status === 'pending') return 'ask';
-  if (approval && approval.status !== 'allow') return 'skipped';
+  if (approval && approval.status !== 'allow' && approval.status !== 'always') return 'skipped';
   const status = event?.type.replace('tool.', '');
   if (!status || status === 'started') return 'working';
   return { completed: 'done', failed: 'failed' }[status] || 'skipped';
@@ -914,7 +916,13 @@ function stepItem(key, { approval, event, preview }) {
         kind === 'ask'
           ? h('div', { class: 'step-actions' },
             h('button', { class: 'btn-deny', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'deny') }, 'Deny'),
+            approval.always?.length
+              ? h('button', { class: 'btn-deny', type: 'button', disabled: busy, title: `Don't ask again in this project, in any chat: ${approval.always.join(', ')}`, onclick: () => respond(approval.requestId, 'always') }, 'Always')
+              : null,
             h('button', { class: 'btn-allow', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'allow') }, icon('check', 'icon icon-sm'), 'Allow'))
+          : null,
+        kind === 'ask' && approval.always?.length
+          ? h('p', { class: 'step-meta' }, `Always: allowed from now on in this project, in every chat: ${approval.always.join(', ')}`)
           : null,
         resultDetails(event))),
   };
@@ -1513,7 +1521,8 @@ function handleEvent(event) {
         break;
       }
       turn.approvals = [...turn.approvals.filter((a) => a.requestId !== event.requestId), {
-        requestId: event.requestId, tool: event.tool, summary: event.summary, arguments: event.arguments, status: 'pending',
+        requestId: event.requestId, tool: event.tool, summary: event.summary, arguments: event.arguments,
+        always: event.always || [], status: 'pending',
       }];
       schedule(renderChatHeader, renderMessages);
       break;

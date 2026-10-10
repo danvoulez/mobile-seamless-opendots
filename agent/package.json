@@ -1,0 +1,8 @@
+{
+  "name": "open-dots-agent",
+  "private": true,
+  "description": "The OpenCode version coding assistants run on (server/app/services/coding_agent.py). Bump it here, run npm install, and CI tests it before it reaches anyone.",
+  "dependencies": {
+    "opencode-ai": "1.18.33"
+  }
+}

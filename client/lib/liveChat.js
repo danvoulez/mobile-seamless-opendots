@@ -65,7 +65,8 @@ export function applyChatEvent(chat, event) {
     case 'request.opened': {
       if (!turn) return { ...chat, needsReload: true };
       const approval = {
-        requestId: event.requestId, tool: event.tool, summary: event.summary, arguments: event.arguments, status: 'pending',
+        requestId: event.requestId, tool: event.tool, summary: event.summary, arguments: event.arguments,
+        always: event.always || [], status: 'pending',
       };
       return {
         ...chat,
@@ -100,6 +101,8 @@ export function applyChatEvent(chat, event) {
 export function toolLabel(name) {
   const [family, action = ''] = String(name || '').split('.');
   if (family === 'connector') return action.startsWith('github') ? 'GitHub' : 'Apps';
+  // Coding assistants' steps (OpenCode's tools).
+  if (family === 'code') return { bash: 'Terminal', edit: 'Edit', write: 'Edit', patch: 'Edit', multiedit: 'Edit', read: 'Files', list: 'Files', glob: 'Files', grep: 'Files', webfetch: 'Web', websearch: 'Web search', task: 'Subtask' }[action] || 'Code';
   return { workspace: 'Files', search: 'Web search', computer: 'Computer' }[family] || 'Action';
 }
 
@@ -118,7 +121,7 @@ export function keepToolEvent(tools, event) {
 // What a step is doing: ask (waiting for you), working, done, failed or skipped.
 export function stepKind(approval, event) {
   if (approval?.status === 'pending') return 'ask';
-  if (approval && approval.status !== 'allow') return 'skipped';
+  if (approval && approval.status !== 'allow' && approval.status !== 'always') return 'skipped';
   const status = event?.type?.replace('tool.', '');
   if (!status || status === 'started') return 'working';
   return { completed: 'done', failed: 'failed' }[status] || 'skipped';

@@ -274,12 +274,15 @@ export default function Dashboard({ onLogout }) {
     }
   };
 
-  const handleCreateNewBot = async ({ name, role, model }) => {
+  const handleCreateNewBot = async ({ name, role, model, engine = 'model', projectDir = '' }) => {
+    const coding = engine === 'opencode';
     const newBot = await createBot({
       name,
-      role: role || 'AI Assistant',
+      role: role || (coding ? 'Coding assistant' : 'AI Assistant'),
       model,
-      description: `Custom assistant that talks with ${model}.`,
+      engine,
+      project_dir: coding ? projectDir : '',
+      description: coding ? `Coding assistant on OpenCode with ${model}.` : `Custom assistant that talks with ${model}.`,
       avatar: '🤖',
       system_prompt: `You are ${name}, a helpful AI assistant.`
     });
