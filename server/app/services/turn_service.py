@@ -24,7 +24,7 @@ from app.services.action_gateway import (
 )
 from app.services.approval_broker import approval_broker
 from app.services.coding_agent import (
-    CodingAgentError, coding_agent, coding_instructions, model_ref, project_dir_for, project_plugins,
+    CodingAgentError, coding_agent, coding_instructions, project_dir_for, project_plugins,
 )
 from app.services.connector_actions import ConnectorCommandError, parse_connector_command
 from app.services.event_bus import EventBus, event_bus
@@ -447,7 +447,6 @@ class CodingTurn:
         })
         stored = self.turns.storage.get_messages(thread_id=state.thread_id)
         latest = next((m for m in reversed(stored) if m.get("sender") == "user"), None) or {}
-        app_settings = self.turns.storage.get_settings()
         try:
             self.directory = str(project_dir_for(self.bot))
             plugins = project_plugins(Path(self.directory))
@@ -468,7 +467,7 @@ class CodingTurn:
         try:
             await self.agent.prompt(
                 self.session_id, self.directory, latest.get("text") or "", latest.get("image_url"),
-                model_ref(state.model, app_settings), coding_instructions(self.bot, Path(self.directory)),
+                self.agent.model(state.model), coding_instructions(self.bot, Path(self.directory)),
             )
             await self._follow(events)
         except asyncio.CancelledError:

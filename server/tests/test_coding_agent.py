@@ -50,6 +50,9 @@ class FakeAgent:
         self.fail_start = None
         self.replied = asyncio.Event()
 
+    def model(self, model):
+        return {"providerID": "vercel", "modelID": model}
+
     async def ensure_running(self):
         if self.fail_start:
             raise CodingAgentError(self.fail_start)
@@ -296,6 +299,19 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("approves them on one of their devices", text)
         # The same assistant always gives the same text, so it stays in the provider's cache.
         self.assertEqual(text, coding_instructions({"system_prompt": "You write Rust.", "role": "crates"}))
+
+    def test_every_coding_assistants_model_is_in_the_catalog(self):
+        prepared = build_config({"model_api_base_url": "https://llm.example.com/v1", "model_api_key": "sk",
+                                 "model_ids": ["m1"], "default_model": "m1"}, ["older-model", None, "m1"])
+        self.assertEqual(list(prepared["config"]["provider"]["opendots"]["models"]), ["m1", "older-model"])
+
+    def test_a_reply_uses_the_provider_opencode_is_running_with(self):
+        # Settings may have switched provider while a reply ran; OpenCode
+        # restarts only once nothing runs, so replies name the running one.
+        agent = coding_module.OpenCodeAgent()
+        agent.provider_id = "vercel"
+        self.assertEqual(agent.model("anthropic/claude-sonnet-4.5"),
+                         {"providerID": "vercel", "modelID": "anthropic/claude-sonnet-4.5"})
 
     def test_a_provider_is_required(self):
         with patch.object(settings, "MODEL_API_BASE_URL", ""), patch.object(settings, "MODEL_API_KEY", ""):

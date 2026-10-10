@@ -159,7 +159,7 @@ def provider_id_for(base_url: str) -> str:
     return VERCEL_PROVIDER_ID if _is_vercel(base_url) else PROVIDER_ID
 
 
-def build_config(app_settings: Dict[str, Any]) -> Dict[str, Any]:
+def build_config(app_settings: Dict[str, Any], extra_models: Optional[List[str]] = None) -> Dict[str, Any]:
     """OpenCode's configuration and environment for the provider in Settings.
 
     Returns {"config": ..., "env": ...}. The key and headers go in the file,
@@ -174,7 +174,11 @@ def build_config(app_settings: Dict[str, Any]) -> Dict[str, Any]:
             "Coding assistants use the model provider from Settings → Model provider. Add its address and key first."
         )
     default_model = app_settings.get("default_model") or settings.DEFAULT_MODEL
-    model_ids = list(dict.fromkeys([*(app_settings.get("model_ids") or []), default_model]))
+    # OpenCode only uses models its configuration lists: the catalog from
+    # Settings, plus every coding assistant's own model (one may predate the catalog).
+    model_ids = list(dict.fromkeys(
+        [*(app_settings.get("model_ids") or []), default_model, *(m for m in (extra_models or []) if m)]
+    ))
     provider = provider_id_for(base_url)
 
     env: Dict[str, str] = {}
@@ -261,6 +265,10 @@ class OpenCodeAgent:
         self.base_url: Optional[str] = None
         self.password: Optional[str] = None
         self.digest: Optional[str] = None
+        # The provider the running OpenCode was configured with. A reply uses
+        # it even if Settings changed meanwhile: OpenCode restarts with the new
+        # provider only when no reply is running (ensure_running).
+        self.provider_id: str = PROVIDER_ID
         self.client: Optional[httpx.AsyncClient] = None
         self._lock = asyncio.Lock()
         self._listeners: Dict[str, Set[asyncio.Queue]] = {}
@@ -283,7 +291,8 @@ class OpenCodeAgent:
     async def ensure_running(self) -> None:
         """Start OpenCode, or restart it after the model provider changed (when no reply is running)."""
         async with self._lock:
-            prepared = build_config(self.storage.get_settings())
+            coding_models = [bot.get("model") for bot in self.storage.get_bots() if bot.get("engine") == "opencode"]
+            prepared = build_config(self.storage.get_settings(), coding_models)
             digest = hashlib.sha256(json.dumps(prepared, sort_keys=True).encode()).hexdigest()
             if self._running() and (digest == self.digest or self._listeners):
                 return
@@ -358,6 +367,7 @@ class OpenCodeAgent:
                 raise CodingAgentError("OpenCode didn't start in time.")
             await asyncio.sleep(0.25)
         self.digest = digest
+        self.provider_id = prepared["config"]["model"].split("/", 1)[0]
         self._connected.clear()
         self._events_task = asyncio.create_task(self._follow_events())
         try:
@@ -490,6 +500,10 @@ class OpenCodeAgent:
         if response.status_code == 204 or not response.content:
             return True
         return response.json()
+
+    def model(self, model: str) -> Dict[str, str]:
+        """A model as the running OpenCode names it."""
+        return {"providerID": self.provider_id, "modelID": model}
 
     async def session_exists(self, session_id: str, directory: str) -> bool:
         return bool(await self._request("GET", f"/session/{session_id}", directory))
