@@ -32,9 +32,9 @@ def delta(message_id, part_id, text):
         "sessionID": SESSION, "messageID": message_id, "partID": part_id, "field": "text", "delta": text}}
 
 
-def tool(message_id, status, **state):
+def tool(message_id, status, call_id="call_1", **state):
     return {"type": "message.part.updated", "properties": {"sessionID": SESSION, "part": {
-        "id": "prt_tool", "sessionID": SESSION, "messageID": message_id, "type": "tool", "callID": "call_1",
+        "id": f"prt_{call_id}", "sessionID": SESSION, "messageID": message_id, "type": "tool", "callID": call_id,
         "tool": "bash", "state": {"status": status, "input": {"command": "npm test"}, **state}}}}
 
 
@@ -118,7 +118,9 @@ SCRIPT = [
 ]
 
 
-class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
+class CodingTurnCase(unittest.IsolatedAsyncioTestCase):
+    """A coding assistant, its project folder and a stand-in OpenCode."""
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.storage = StorageService(Path(self.directory.name))
@@ -152,6 +154,9 @@ class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(approval_broker.resolve(event["requestId"], decision))
                 return
 
+
+
+class CodingTurnTests(CodingTurnCase):
     async def test_reply_tools_approval_and_usage(self):
         self.say("run the tests")
         state = self.turns.start("thr-code", "bot-code")
@@ -392,6 +397,133 @@ class EveryAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([tool["type"] for tool in self.turns.recent["thr-1"].tools], ["tool.completed"])
 
 
+def child_session(child_id):
+    return {"type": "session.created", "properties": {"sessionID": child_id, "info": {
+        "id": child_id, "parentID": SESSION, "directory": "/p", "title": "subagent"}}}
+
+
+def in_session(event, session_id):
+    """The same event, from another session (a subagent's)."""
+    event = json.loads(json.dumps(event))
+    props = event["properties"]
+    props["sessionID"] = session_id
+    for key in ("info", "part"):
+        if isinstance(props.get(key), dict):
+            props[key]["sessionID"] = session_id
+    return event
+
+
+QUESTION = {"type": "question.asked", "properties": {
+    "id": "que_1", "sessionID": SESSION, "tool": {"messageID": "msg_1", "callID": "call_q"},
+    "questions": [{"question": "Which database?", "header": "Database", "multiple": False,
+                   "options": [{"label": "SQLite", "description": "One file"},
+                               {"label": "Postgres", "description": "A server"}]}]}}
+
+
+class QuestionAndSubagentTests(CodingTurnCase):
+    """OpenCode's questions and subagents, followed on every device."""
+
+    async def next_opened(self):
+        while True:
+            event = await self.events.next(timeout=5)
+            if event["type"] == "request.opened":
+                return event
+
+    async def test_a_question_reaches_every_device_and_the_answer_goes_back(self):
+        self.agent.script = [assistant("msg_1"), QUESTION, "WAIT_FOR_REPLY",
+                             delta("msg_1", "prt_a", "SQLite it is."),
+                             {"type": "session.idle", "properties": {"sessionID": SESSION}}]
+        self.agent.reply_question = self.record("question")
+        self.say("set up storage")
+        self.turns.start("thr-code", "bot-code")
+        opened = await self.next_opened()
+        self.assertEqual(opened["requestType"], "question")
+        self.assertEqual(opened["requestId"], "call_q")
+        self.assertEqual(opened["summary"], "Which database?")
+        self.assertEqual([o["label"] for o in opened["questions"][0]["options"]], ["SQLite", "Postgres"])
+        self.assertTrue(opened["questions"][0]["custom"])
+        self.assertEqual(self.turns.status("thr-code"), "waiting")
+        # A question can't be "allowed"; it is answered.
+        self.assertFalse(approval_broker.resolve("call_q", "allow"))
+        self.assertTrue(approval_broker.resolve("call_q", "answer", [["SQLite"]]))
+        await asyncio.wait_for(self.turns.wait("thr-code"), 5)
+        self.assertEqual(self.agent.replies, [("que_1", [["SQLite"]])])
+        self.assertEqual(self.storage.get_last_message("thr-code")["text"], "SQLite it is.")
+        approval = self.turns.recent["thr-code"].approvals["call_q"]
+        self.assertEqual((approval["status"], approval["answers"]), ("answer", [["SQLite"]]))
+
+    async def test_an_unanswered_question_is_rejected(self):
+        self.agent.script = [assistant("msg_1"), QUESTION, "WAIT_FOR_REPLY",
+                             {"type": "session.idle", "properties": {"sessionID": SESSION}}]
+        self.agent.reject_question = self.record("reject")
+        self.say("set up storage")
+        self.turns.start("thr-code", "bot-code")
+        opened = await self.next_opened()
+        self.assertTrue(approval_broker.resolve(opened["requestId"], "deny"))
+        await asyncio.wait_for(self.turns.wait("thr-code"), 5)
+        self.assertEqual(self.agent.replies, [("que_1", "rejected")])
+
+    async def test_a_subagents_approval_steps_and_cost_belong_to_the_reply_but_not_its_text(self):
+        child = "ses_child"
+        child_permission = in_session({"type": "permission.asked", "properties": {
+            "id": "per_c", "sessionID": child, "permission": "bash", "patterns": ["ls"],
+            "metadata": {"command": "ls"}, "always": ["ls *"], "tool": {"messageID": "msg_c", "callID": "call_c"}}}, child)
+        agent = coding_module.OpenCodeAgent(storage=self.storage, binary="/nonexistent")
+        queue = agent.listen(SESSION)
+        for event in [child_session(child),
+                      in_session(assistant("msg_c"), child),
+                      in_session(delta("msg_c", "prt_c", "subagent notes"), child),
+                      child_permission,
+                      in_session({"type": "session.idle", "properties": {"sessionID": child}}, child)]:
+            agent._dispatch(event)
+        routed = [queue.get_nowait() for _ in range(queue.qsize())]
+        self.assertEqual(len(routed), 5)  # everything a subagent does reaches the reply that started it
+
+        self.agent.script = [
+            assistant("msg_1"),
+            *routed[1:3],  # the subagent's message and its text
+            in_session(tool("msg_c", "running", call_id="call_c"), child),
+            routed[3], "WAIT_FOR_REPLY",  # its permission
+            routed[4],  # its session going idle
+            in_session(assistant("msg_c", completed=True, cost=0.5, tokens={
+                "input": 10, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}), child),
+            delta("msg_1", "prt_a", "Done."),
+            {"type": "session.idle", "properties": {"sessionID": SESSION}},
+        ]
+        self.say("look around")
+        self.turns.start("thr-code", "bot-code")
+        opened = await self.next_opened()
+        self.assertEqual(opened["requestId"], "call_c")  # the subagent's step asks on the devices
+        self.assertTrue(approval_broker.resolve("call_c", "allow"))
+        await asyncio.wait_for(self.turns.wait("thr-code"), 5)
+        message = self.storage.get_last_message("thr-code")
+        self.assertEqual(message["text"], "Done.")  # the subagent's idle didn't end the reply, its text isn't shown
+        self.assertEqual(message["usage"]["cost_usd"], 0.5)
+        self.assertEqual(self.agent.replies, [("per_c", "once")])
+        steps = {step["requestId"] for step in self.turns.recent["thr-code"].tools}
+        self.assertIn("call_c", steps)
+
+    def record(self, kind):
+        async def recorder(request_id, directory, answers=None):
+            self.agent.replies.append((request_id, answers if kind == "question" else "rejected"))
+            self.agent.replied.set()
+        return recorder
+
+
+class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_questions_take_answers_and_permissions_dont(self):
+        call = type("Call", (), {"name": "code.bash", "summary": "ls", "arguments_for_display": {}})()
+        approval_broker.open("t", "b", call, request_id="perm-1")
+        self.assertFalse(approval_broker.resolve("perm-1", "answer", [["x"]]))
+        self.assertTrue(approval_broker.resolve("perm-1", "allow"))
+        approval_broker.open("t", "b", call, request_id="q-1", kind="question")
+        self.assertFalse(approval_broker.resolve("q-1", "answer", []))
+        self.assertTrue(approval_broker.resolve("q-1", "answer", [["SQLite"]]))
+        self.assertEqual(await approval_broker.wait("q-1"), "answer")
+        self.assertEqual(approval_broker.take_answers("q-1"), [["SQLite"]])
+        self.assertIsNone(approval_broker.take_answers("q-1"))
+
+
 class ConfigTests(unittest.TestCase):
     def test_which_assistants_and_providers_opencode_serves(self):
         self.assertTrue(uses_opencode({}))
@@ -415,9 +547,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(set(config["provider"]["vercel"]["models"]), {"moonshotai/kimi-k2", "anthropic/claude-sonnet-4.5"})
         self.assertEqual(config["permission"]["*"], "ask")
         self.assertEqual(config["permission"]["read"]["*.env"], "deny")
-        # Subagent sessions and questions would wait for answers no device can give.
-        self.assertEqual(config["permission"]["task"], "deny")
-        self.assertEqual(config["permission"]["question"], "deny")
+        # Subagents and questions are on: their approvals and questions reach every device.
+        self.assertEqual(config["permission"]["task"], "allow")
+        self.assertEqual(config["permission"]["question"], "allow")
         self.assertFalse(config["autoupdate"])
         self.assertEqual(config["share"], "disabled")
 

@@ -62,12 +62,11 @@ PERMISSIONS: Dict[str, Any] = {
     "websearch": "ask",
     "external_directory": "ask",
     "doom_loop": "ask",
-    # Subagents work in sessions of their own, whose approvals no device would
-    # see, and they multiply what a reply costs. The question tool waits for
-    # an answer through a channel Open Dots doesn't offer; the assistant asks
-    # in its reply instead.
-    "task": "deny",
-    "question": "deny",
+    # Subagents work in sessions of their own; Open Dots follows those too, so
+    # what they want to do asks on the person's devices like anything else.
+    "task": "allow",
+    # Questions with choices reach every device as a step to answer.
+    "question": "allow",
 }
 
 # Instruction files a project may keep for coding agents, the first one found
@@ -173,6 +172,17 @@ def project_plugins(directory: Path) -> List[Path]:
 def agent_environment(base: Dict[str, str]) -> Dict[str, str]:
     """The environment OpenCode starts with: no Open Dots credentials, no provider key."""
     return {key: value for key, value in base.items() if key in ENV_KEPT or key.startswith("LC_")}
+
+
+def event_session(event: Dict[str, Any]) -> Optional[str]:
+    """The OpenCode session an event belongs to."""
+    properties = event.get("properties") or {}
+    session_id = properties.get("sessionID")
+    if not session_id and isinstance(properties.get("info"), dict):
+        session_id = properties["info"].get("sessionID")
+    if not session_id and isinstance(properties.get("part"), dict):
+        session_id = properties["part"].get("sessionID")
+    return session_id
 
 
 class CodingAgentError(Exception):
@@ -301,6 +311,9 @@ class OpenCodeAgent:
         self.client: Optional[httpx.AsyncClient] = None
         self._lock = asyncio.Lock()
         self._listeners: Dict[str, Set[asyncio.Queue]] = {}
+        # Subagents' sessions and the session that started each one, so their
+        # events (approvals, questions, steps, costs) reach that reply too.
+        self._parents: Dict[str, str] = {}
         self._events_task: Optional[asyncio.Task] = None
         self._connected = asyncio.Event()
 
@@ -472,14 +485,18 @@ class OpenCodeAgent:
                 self._listeners.pop(session_id, None)
 
     def _dispatch(self, event: Dict[str, Any]) -> None:
-        properties = event.get("properties") or {}
-        session_id = properties.get("sessionID")
-        if not session_id and isinstance(properties.get("info"), dict):
-            session_id = properties["info"].get("sessionID")
-        if not session_id and isinstance(properties.get("part"), dict):
-            session_id = properties["part"].get("sessionID")
-        for queue in list(self._listeners.get(session_id, ())):
-            queue.put_nowait(event)
+        session_id = event_session(event)
+        if event.get("type") in ("session.created", "session.updated"):
+            info = (event.get("properties") or {}).get("info") or {}
+            if info.get("id") and info.get("parentID"):
+                self._parents[info["id"]] = info["parentID"]
+        # The session itself, then each one above it: a reply hears its subagents.
+        seen: Set[str] = set()
+        while session_id and session_id not in seen:
+            seen.add(session_id)
+            for queue in list(self._listeners.get(session_id, ())):
+                queue.put_nowait(event)
+            session_id = self._parents.get(session_id)
 
     def _broadcast(self, event: Dict[str, Any]) -> None:
         for queues in list(self._listeners.values()):
@@ -569,6 +586,12 @@ class OpenCodeAgent:
 
     async def reply_permission(self, request_id: str, directory: str, reply: str) -> None:
         await self._request("POST", f"/permission/{request_id}/reply", directory, {"reply": reply})
+
+    async def reply_question(self, request_id: str, directory: str, answers: List[List[str]]) -> None:
+        await self._request("POST", f"/question/{request_id}/reply", directory, {"answers": answers})
+
+    async def reject_question(self, request_id: str, directory: str) -> None:
+        await self._request("POST", f"/question/{request_id}/reject", directory)
 
 
 coding_agent = OpenCodeAgent()

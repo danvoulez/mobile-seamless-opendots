@@ -39,6 +39,7 @@ const ICONS = {
   x: [['line', { x1: 18, y1: 6, x2: 6, y2: 18 }], ['line', { x1: 6, y1: 6, x2: 18, y2: 18 }]],
   check: [['polyline', { points: '20 6 9 17 4 12' }]],
   shield: [['path', { d: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z' }]],
+  help: [['circle', { cx: 12, cy: 12, r: 10 }], ['path', { d: 'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3' }], ['line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }]],
   terminal: [['polyline', { points: '4 17 10 11 4 5' }], ['line', { x1: 12, y1: 19, x2: 20, y2: 19 }]],
   search: [['circle', { cx: 11, cy: 11, r: 8 }], ['line', { x1: 21, y1: 21, x2: 16.65, y2: 16.65 }]],
   share: [['path', { d: 'M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8' }], ['polyline', { points: '16 6 12 2 8 6' }], ['line', { x1: 12, y1: 2, x2: 12, y2: 15 }]],
@@ -867,8 +868,8 @@ function messageItem(message) {
 function toolLabel(name) {
   const [family, action = ''] = String(name || '').split('.');
   if (family === 'connector') return action.startsWith('github') ? 'GitHub' : 'Apps';
-  // Coding assistants' steps (OpenCode's tools).
-  if (family === 'code') return { bash: 'Terminal', edit: 'Edit', write: 'Edit', patch: 'Edit', multiedit: 'Edit', read: 'Files', list: 'Files', glob: 'Files', grep: 'Files', webfetch: 'Web', websearch: 'Web search', task: 'Subtask' }[action] || 'Code';
+  // Steps from OpenCode, the assistants' tools.
+  if (family === 'code') return { question: 'Question', bash: 'Terminal', edit: 'Edit', write: 'Edit', patch: 'Edit', multiedit: 'Edit', read: 'Files', list: 'Files', glob: 'Files', grep: 'Files', webfetch: 'Web', websearch: 'Web search', task: 'Subtask' }[action] || 'Code';
   return { workspace: 'Files', search: 'Web search', computer: 'Computer' }[family] || 'Action';
 }
 
@@ -877,6 +878,8 @@ function toolLabel(name) {
 // quick run of steps rather than a stack of boxes.
 function stepKind(approval, event) {
   if (approval?.status === 'pending') return 'ask';
+  // A question the person answered is done; OpenCode's question step may never report back.
+  if (approval?.status === 'answer') return 'done';
   if (approval && approval.status !== 'allow' && approval.status !== 'always') return 'skipped';
   const status = event?.type.replace('tool.', '');
   if (!status || status === 'started') return 'working';
@@ -886,6 +889,11 @@ function stepKind(approval, event) {
 const STEP_ICONS = { ask: 'shield', done: 'check', failed: 'x', skipped: 'minus' };
 
 function stepStatus(kind, approval) {
+  if (approval?.requestType === 'question') {
+    if (kind === 'ask') return 'Asks you';
+    if (approval.status === 'answer') return `Answered: ${(approval.answers || []).map((a) => a.join(', ')).join(' · ')}`;
+    if (approval.status === 'deny') return 'Not answered';
+  }
   if (kind === 'skipped') return { deny: 'Denied', expired: 'Not answered in time' }[approval?.status] || 'Skipped';
   return { ask: 'Needs your approval', working: 'Working…', done: 'Done', failed: "Didn't work" }[kind];
 }
@@ -897,23 +905,89 @@ function resultDetails(event) {
     h('pre', null, JSON.stringify(event.result, null, 2)));
 }
 
+// A question the assistant asks (OpenCode's question tool): its choices as
+// chips, and a line to type something else when allowed. One question with a
+// single choice is answered with one tap; otherwise choose, then Answer. What
+// is typed stays out of the step's signature, so typing never redraws it.
+const questionPicks = new Map();
+
+function picksFor(approval) {
+  if (!questionPicks.has(approval.requestId)) {
+    const questions = approval.questions || [];
+    questionPicks.set(approval.requestId, { chosen: questions.map(() => []), typed: questions.map(() => '') });
+  }
+  return questionPicks.get(approval.requestId);
+}
+
+function pickOption(approval, index, label) {
+  const questions = approval.questions || [];
+  if (questions.length === 1 && !questions[0].multiple) {
+    answerQuestion(approval, [[label]]);
+    return;
+  }
+  const picks = picksFor(approval);
+  const picked = picks.chosen[index];
+  if (!questions[index].multiple) picks.chosen[index] = [label];
+  else picks.chosen[index] = picked.includes(label) ? picked.filter((l) => l !== label) : [...picked, label];
+  schedule(renderMessages);
+}
+
+function answerQuestion(approval, answers) {
+  const picks = picksFor(approval);
+  const chosen = answers || picks.chosen.map((labels, i) => [...labels, ...(picks.typed[i].trim() ? [picks.typed[i].trim()] : [])]);
+  if (!chosen.every((answer) => answer.length)) {
+    toast('Choose an answer first.');
+    return;
+  }
+  respond(approval.requestId, 'answer', chosen);
+}
+
+function questionForm(approval, busy) {
+  const questions = approval.questions || [];
+  const picks = picksFor(approval);
+  const oneTap = questions.length === 1 && !questions[0].multiple;
+  return h('div', { class: 'step-question' },
+    questions.map((question, index) => h('div', { class: 'question' },
+      questions.length > 1 ? h('p', { class: 'question-text' }, question.question) : null,
+      h('div', { class: 'question-options' }, question.options.map((option) => h('button', {
+        class: picks.chosen[index].includes(option.label) ? 'chip chip-on' : 'chip',
+        type: 'button', disabled: busy, title: option.description || null,
+        'aria-pressed': String(picks.chosen[index].includes(option.label)),
+        onclick: () => pickOption(approval, index, option.label),
+      }, option.label))),
+      question.custom ? h('input', {
+        class: 'question-input', type: 'text', placeholder: 'Or type your answer', value: picks.typed[index],
+        'aria-label': `Your answer: ${question.question}`, disabled: busy,
+        oninput: (event) => { picks.typed[index] = event.target.value; },
+        onkeydown: (event) => { if (event.key === 'Enter') answerQuestion(approval); },
+      }) : null)),
+    h('div', { class: 'step-actions' },
+      h('button', { class: 'btn-deny', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'deny') }, 'Skip'),
+      !oneTap || questions[0]?.custom
+        ? h('button', { class: 'btn-answer', type: 'button', disabled: busy, onclick: () => answerQuestion(approval) }, 'Answer')
+        : null));
+}
+
 function stepItem(key, { approval, event, preview }) {
   const kind = stepKind(approval, event);
   const label = toolLabel(approval?.tool || event?.tool);
   const title = approval?.summary || preview || label;
   const busy = approval ? state.approvalsBusy.has(approval.requestId) : false;
+  const question = approval?.requestType === 'question';
+  const picks = question && kind === 'ask' ? JSON.stringify(picksFor(approval).chosen) : '';
   return {
     key: `step-${key}`,
-    sig: `${kind}|${busy}|${event?.type || ''}`,
+    sig: `${kind}|${busy}|${event?.type || ''}|${picks}`,
     build: () => h('div', { class: `step step-${kind}` },
-      h('span', { class: 'step-icon' }, kind === 'working' ? h('i', { class: 'spinner' }) : icon(STEP_ICONS[kind])),
+      h('span', { class: 'step-icon' }, kind === 'working' ? h('i', { class: 'spinner' }) : icon(question && kind === 'ask' ? 'help' : STEP_ICONS[kind])),
       h('div', { class: 'step-main' },
         h('p', { class: 'step-title' }, title),
         h('p', { class: 'step-meta' },
           title !== label ? h('span', { class: 'step-tag' }, label) : null,
           h('span', { class: 'step-status' }, stepStatus(kind, approval))),
         event?.error ? h('p', { class: 'step-error' }, event.error) : null,
-        kind === 'ask'
+        kind === 'ask' && question ? questionForm(approval, busy) : null,
+        kind === 'ask' && !question
           ? h('div', { class: 'step-actions' },
             h('button', { class: 'btn-deny', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'deny') }, 'Deny'),
             approval.always?.length
@@ -921,7 +995,7 @@ function stepItem(key, { approval, event, preview }) {
               : null,
             h('button', { class: 'btn-allow', type: 'button', disabled: busy, onclick: () => respond(approval.requestId, 'allow') }, icon('check', 'icon icon-sm'), 'Allow'))
           : null,
-        kind === 'ask' && approval.always?.length
+        kind === 'ask' && !question && approval.always?.length
           ? h('p', { class: 'step-meta' }, `Always: allowed from now on in this project, in every chat: ${approval.always.join(', ')}`)
           : null,
         resultDetails(event))),
@@ -1188,11 +1262,11 @@ async function send() {
   flush();
 }
 
-async function respond(requestId, action) {
+async function respond(requestId, action, answers) {
   state.approvalsBusy.add(requestId);
   schedule(renderMessages);
   try {
-    await rpc('approvals.respond', { request_id: requestId, action });
+    await rpc('approvals.respond', { request_id: requestId, action, ...(answers ? { answers } : {}) });
   } catch (error) {
     if (error.status === 404) toast('Already answered.');
     else if (error.status !== 401) toast(error.message);
@@ -1523,12 +1597,16 @@ function handleEvent(event) {
       turn.approvals = [...turn.approvals.filter((a) => a.requestId !== event.requestId), {
         requestId: event.requestId, tool: event.tool, summary: event.summary, arguments: event.arguments,
         always: event.always || [], status: 'pending',
+        requestType: event.requestType || 'permission', questions: event.questions || [],
       }];
       schedule(renderChatHeader, renderMessages);
       break;
     case 'request.resolved':
       if (turn) {
-        turn.approvals = turn.approvals.map((a) => (a.requestId === event.requestId ? { ...a, status: event.decision } : a));
+        turn.approvals = turn.approvals.map((a) => (a.requestId === event.requestId
+          ? { ...a, status: event.decision, ...(event.answers ? { answers: event.answers } : {}) }
+          : a));
+        questionPicks.delete(event.requestId);
         schedule(renderChatHeader, renderMessages);
       }
       break;

@@ -105,8 +105,8 @@ export default function ChatWindow({
     }
   };
 
-  const handleApprovalResponse = async (requestId, action) => {
-    await onRespondApproval(requestId, action);
+  const handleApprovalResponse = async (requestId, action, answers) => {
+    await onRespondApproval(requestId, action, answers);
   };
 
   const handleImageSelect = async (e) => {

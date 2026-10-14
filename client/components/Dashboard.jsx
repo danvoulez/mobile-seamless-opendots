@@ -243,8 +243,8 @@ export default function Dashboard({ onLogout }) {
     }
   };
 
-  const handleRespondApproval = async (requestId, action) => {
-    await respondApproval(requestId, action);
+  const handleRespondApproval = async (requestId, action, answers) => {
+    await respondApproval(requestId, action, answers);
   };
 
   const handleInstallUpdate = async () => {

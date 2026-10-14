@@ -117,12 +117,12 @@ jobs:
       - name: Browser
         working-directory: e2e
         run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
-      - name: Run the suites
-        run: e2e/run.sh
       - name: OpenCode (the pinned version)
         working-directory: agent
         run: npm ci --no-audit --no-fund
-      - name: Coding assistant on the real OpenCode
+      - name: Run the suites
+        run: e2e/run.sh
+      - name: Assistants on the real OpenCode
         run: server/.venv/bin/python e2e/coding.py
       - name: Keep the screenshots
         if: always()

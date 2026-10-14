@@ -1,10 +1,87 @@
 'use client';
 
 import React, { useState } from 'react';
-import { FiShield, FiCheck, FiX, FiMinus } from 'react-icons/fi';
+import { FiShield, FiCheck, FiX, FiMinus, FiHelpCircle } from 'react-icons/fi';
 import { stepKind, stepStatus, toolLabel } from '../lib/liveChat';
 
 const ICONS = { ask: FiShield, done: FiCheck, failed: FiX, skipped: FiMinus };
+const PILL = 'h-7 px-3.5 rounded-full border text-[11px] font-semibold transition disabled:opacity-50';
+const PILL_OFF = 'border-white/[0.07] bg-white/[0.03] hover:bg-white/[0.055] text-zinc-300';
+const PILL_ON = 'border-blue-400/40 bg-blue-500/15 text-blue-100';
+
+// A question the assistant asks (OpenCode's question tool): its choices as
+// pills, and a line to type something else when allowed. One question with a
+// single choice is answered with one tap; otherwise choose, then Answer.
+function QuestionForm({ questions, disabled, onAnswer, onSkip }) {
+  const [chosen, setChosen] = useState(() => questions.map(() => []));
+  const [typed, setTyped] = useState(() => questions.map(() => ''));
+  const oneTap = questions.length === 1 && !questions[0].multiple;
+  const answers = questions.map((_, i) => [...chosen[i], ...(typed[i].trim() ? [typed[i].trim()] : [])]);
+  const ready = answers.every((answer) => answer.length > 0);
+
+  const choose = (index, label) => {
+    if (oneTap) {
+      onAnswer([[label]]);
+      return;
+    }
+    setChosen((prev) => prev.map((picked, i) => {
+      if (i !== index) return picked;
+      if (!questions[i].multiple) return [label];
+      return picked.includes(label) ? picked.filter((l) => l !== label) : [...picked, label];
+    }));
+  };
+
+  return (
+    <div className="mt-2 mb-1 space-y-3">
+      {questions.map((question, index) => (
+        <div key={index} className="space-y-1.5">
+          {questions.length > 1 && <p className="text-xs text-zinc-200 break-words">{question.question}</p>}
+          <div className="flex flex-wrap gap-1.5">
+            {question.options.map((option) => (
+              <button
+                key={option.label}
+                type="button"
+                disabled={disabled}
+                title={option.description || undefined}
+                aria-pressed={chosen[index].includes(option.label)}
+                onClick={() => choose(index, option.label)}
+                className={`${PILL} ${chosen[index].includes(option.label) ? PILL_ON : PILL_OFF}`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {question.custom && (
+            <input
+              value={typed[index]}
+              disabled={disabled}
+              onChange={(event) => setTyped((prev) => prev.map((text, i) => (i === index ? event.target.value : text)))}
+              onKeyDown={(event) => { if (event.key === 'Enter' && ready) onAnswer(answers); }}
+              placeholder="Or type your answer"
+              aria-label={`Your answer: ${question.question}`}
+              className="w-full max-w-sm bg-white/[0.03] border border-white/[0.07] rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500/60"
+            />
+          )}
+        </div>
+      ))}
+      <div className="flex items-center gap-2">
+        <button type="button" disabled={disabled} onClick={onSkip} className={`${PILL} ${PILL_OFF}`}>
+          Skip
+        </button>
+        {(!oneTap || questions[0].custom) && (
+          <button
+            type="button"
+            disabled={disabled || !ready}
+            onClick={() => onAnswer(answers)}
+            className="h-7 px-3.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold transition disabled:opacity-50"
+          >
+            Answer
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 const ICON_STYLES = {
   ask: 'bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/35',
@@ -25,13 +102,14 @@ export default function ActionStep({ approval, event, preview, last, onRespond }
   const kind = stepKind(approval, event);
   const label = toolLabel(approval?.tool || event?.tool);
   const title = approval?.summary || preview || label;
-  const Icon = ICONS[kind];
+  const question = approval?.requestType === 'question';
+  const Icon = question && kind === 'ask' ? FiHelpCircle : ICONS[kind];
 
-  const answer = async (action) => {
+  const answer = async (action, answers) => {
     setIsSubmitting(true);
     setError('');
     try {
-      await onRespond(approval.requestId, action);
+      await onRespond(approval.requestId, action, answers);
       // Stay disabled until the answer comes back as an event.
     } catch (err) {
       setError(err?.message || "Couldn't send your answer.");
@@ -59,7 +137,18 @@ export default function ActionStep({ approval, event, preview, last, onRespond }
           <span className={STATUS_STYLES[kind] || ''}>{stepStatus(kind, approval)}</span>
         </p>
         {event?.error && <p className="mt-0.5 text-[11px] text-rose-300 break-words">{event.error}</p>}
-        {kind === 'ask' && (
+        {kind === 'ask' && question && (
+          <>
+            <QuestionForm
+              questions={approval.questions || []}
+              disabled={isSubmitting}
+              onAnswer={(answers) => answer('answer', answers)}
+              onSkip={() => answer('deny')}
+            />
+            {error && <p role="alert" className="text-[11px] text-rose-400">{error}</p>}
+          </>
+        )}
+        {kind === 'ask' && !question && (
           <div className="flex items-center gap-2 mt-2 mb-1">
             <button
               type="button"
@@ -92,7 +181,7 @@ export default function ActionStep({ approval, event, preview, last, onRespond }
             {error && <span role="alert" className="text-[11px] text-rose-400">{error}</span>}
           </div>
         )}
-        {kind === 'ask' && approval.always?.length > 0 && (
+        {kind === 'ask' && !question && approval.always?.length > 0 && (
           <p className="text-[11px] text-zinc-500 break-words">Always: allowed from now on in this project, in every chat: {approval.always.join(', ')}</p>
         )}
         {event?.result && (
