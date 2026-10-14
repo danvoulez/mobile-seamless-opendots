@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.config import settings
@@ -10,7 +11,7 @@ from app.services import coding_agent as coding_module
 from app.services.approval_broker import approval_broker
 from app.services.coding_agent import (
     PERMISSIONS, CodingAgentError, agent_environment, build_config, coding_instructions, enforced_config, model_ref,
-    project_plugins, validate_project_dir,
+    opencode_can_reply, project_plugins, uses_opencode, validate_project_dir,
 )
 from app.services.event_bus import EventBus
 from app.services.storage_service import StorageService
@@ -72,9 +73,9 @@ class FakeAgent:
         self.created += 1
         return SESSION
 
-    async def prompt(self, session_id, directory, text, image_url, model, system=""):
+    async def prompt(self, session_id, directory, text, image_url, model, system="", context=""):
         self.prompts.append({"text": text, "image_url": image_url, "model": model, "directory": directory,
-                             "system": system})
+                             "system": system, "context": context})
         asyncio.get_running_loop().create_task(self._play())
 
     async def _play(self):
@@ -255,7 +256,136 @@ class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.agent.aborted, 1)
 
 
+QUICK_REPLY = [
+    assistant("msg_q"),
+    delta("msg_q", "prt_q", "Sure."),
+    assistant("msg_q", completed=True),
+    {"type": "session.idle", "properties": {"sessionID": SESSION}},
+]
+
+
+class StraightFromTheModel:
+    """Stands in for the model provider, for assistants that reply without OpenCode."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def stream_chat_completion(self, **kwargs):
+        self.calls += 1
+        yield {"type": "content.delta", "delta": "Text only."}
+        yield {"type": "turn.completed", "ok": True}
+
+
+class SearchGateway:
+    """Stands in for the action gateway: every command runs, with a fixed result."""
+
+    def __init__(self):
+        self.opened = []
+
+    def open(self, thread_id, bot_id, call):
+        self.opened.append(call.name)
+        tool, action = call.name.split(".", 1)
+        return SimpleNamespace(request_id="req-1", tool=tool, action=action, model_dump=lambda: {}), None
+
+    async def wait_for_decision(self, request):
+        return "allow"
+
+    async def execute(self, request):
+        return SimpleNamespace(status="completed", result={"results": ["opendots.dev"]}, error=None)
+
+
+class EveryAssistantTests(unittest.IsolatedAsyncioTestCase):
+    """Every assistant replies through OpenCode, unless it is text only or the
+    provider is one OpenCode can't use."""
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.storage = StorageService(Path(self.directory.name))
+        self.storage.save_settings({"model_api_base_url": "https://provider.example/v1", "model_api_key": "key",
+                                    "model_api_wire_api": "responses"})
+        base = {key: value for key, value in self.storage.get_bots()[0].items() if key != "engine"}
+        self.storage.save_bots([
+            {**base, "id": "bot-default"},  # made before engines existed
+            {**base, "id": "bot-text", "engine": "model"},
+        ])
+        self.agent = FakeAgent(QUICK_REPLY)
+        self.provider = StraightFromTheModel()
+        self.gateway = SearchGateway()
+        self.turns = TurnService(storage=self.storage, bus=EventBus(), provider=self.provider,
+                                 gateway=self.gateway, coding=self.agent)
+        patcher = patch.object(settings, "PROJECTS_DIR", Path(self.directory.name) / "projects")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def reply(self, bot_id, text, thread_id="thr-1"):
+        if not self.storage.get_thread(thread_id):
+            self.storage.save_thread({"id": thread_id, "bot_id": bot_id, "title": "", "created_at": "now"})
+        count = len(self.storage.get_messages(thread_id=thread_id))
+        self.storage.add_message({"id": f"m-{thread_id}-{count}", "thread_id": thread_id, "bot_id": bot_id,
+                                  "sender": "user", "text": text, "created_at": "now"})
+        self.turns.start(thread_id, bot_id)
+        await asyncio.wait_for(self.turns.wait(thread_id), 5)
+        return self.storage.get_last_message(thread_id)
+
+    async def test_an_assistant_replies_through_opencode_by_default(self):
+        message = await self.reply("bot-default", "hi")
+        self.assertEqual(message["text"], "Sure.")
+        self.assertEqual(len(self.agent.prompts), 1)
+        self.assertEqual(self.provider.calls, 0)
+
+    async def test_a_text_only_assistant_replies_straight_from_the_model(self):
+        message = await self.reply("bot-text", "hi")
+        self.assertEqual(message["text"], "Text only.")
+        self.assertEqual(self.agent.prompts, [])
+
+    async def test_a_provider_opencode_cant_use_keeps_replies_straight_from_the_model(self):
+        self.storage.save_settings({"model_api_wire_api": "prediction", "model_api_base_url": "https://predict.example"})
+        message = await self.reply("bot-default", "hi")
+        self.assertEqual(message["text"], "Text only.")
+        self.assertEqual(self.agent.prompts, [])
+
+    async def test_opencode_is_told_the_conversation_so_far_once(self):
+        # A conversation that began with the assistant replying straight from the model.
+        self.storage.save_thread({"id": "thr-1", "bot_id": "bot-default", "title": "", "created_at": "now"})
+        self.storage.add_message({"id": "m-old-1", "thread_id": "thr-1", "bot_id": "bot-default",
+                                  "sender": "user", "text": "My cat is called Lua.", "created_at": "now"})
+        self.storage.add_message({"id": "m-old-2", "thread_id": "thr-1", "bot_id": "bot-default",
+                                  "sender": "bot", "text": "Lovely name!", "created_at": "now"})
+        await self.reply("bot-default", "What's my cat called?")
+        first = self.agent.prompts[0]
+        self.assertEqual(first["text"], "What's my cat called?")
+        self.assertIn("The person: My cat is called Lua.", first["context"])
+        self.assertIn("You: Lovely name!", first["context"])
+        self.assertNotIn("What's my cat called?", first["context"])
+        # The session remembers from then on: nothing is sent twice.
+        await self.reply("bot-default", "And her age?")
+        self.assertEqual(self.agent.created, 1)
+        self.assertEqual(self.agent.prompts[1]["context"], "")
+
+    async def test_a_command_runs_and_its_result_goes_with_the_message(self):
+        message = await self.reply("bot-default", "/search open dots")
+        self.assertEqual(self.gateway.opened, ["search.web"])
+        prompt = self.agent.prompts[0]
+        self.assertEqual(prompt["text"], "/search open dots")
+        self.assertIn("From Open Dots, not written by the person:", prompt["context"])
+        self.assertIn("Action result (search.web)", prompt["context"])
+        self.assertIn("opendots.dev", prompt["context"])
+        self.assertEqual(message["text"], "Sure.")
+        self.assertEqual([tool["type"] for tool in self.turns.recent["thr-1"].tools], ["tool.completed"])
+
+
 class ConfigTests(unittest.TestCase):
+    def test_which_assistants_and_providers_opencode_serves(self):
+        self.assertTrue(uses_opencode({}))
+        self.assertTrue(uses_opencode({"engine": "opencode"}))
+        self.assertFalse(uses_opencode({"engine": "model"}))
+        self.assertTrue(opencode_can_reply({"model_api_wire_api": "responses"}))
+        self.assertTrue(opencode_can_reply({"model_api_wire_api": "prediction",
+                                            "model_api_base_url": "https://ai-gateway.vercel.sh/v1"}))
+        self.assertFalse(opencode_can_reply({"model_api_wire_api": "prediction",
+                                             "model_api_base_url": "https://predict.example"}))
+        self.assertFalse(opencode_can_reply(None))
     def test_vercel_uses_opencodes_own_provider_and_keeps_the_key_out_of_the_environment(self):
         prepared = build_config({"model_api_base_url": "https://ai-gateway.vercel.sh/v1", "model_api_key": "vck_secret",
                                  "model_ids": ["moonshotai/kimi-k2"], "default_model": "anthropic/claude-sonnet-4.5"})

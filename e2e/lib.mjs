@@ -47,8 +47,14 @@ export async function ok(response) {
   return response.json();
 }
 
+// These suites test the apps (linking, live replies, approvals, reconnecting)
+// with the stand-in model's fixed replies, so their assistants reply text only.
+// Replies through OpenCode, the default, are tested on the real OpenCode in coding.py.
 export async function useFakeModel(mac) {
   await ok(await mac.post('/api/v1/settings', {
     data: { model_api_wire_api: 'responses', model_api_base_url: MODEL_URL, model_api_key: 'test-key', default_model: 'gpt-5-mini' },
   }));
+  for (const bot of await ok(await mac.get('/api/v1/bots'))) {
+    await ok(await mac.put(`/api/v1/bots/${bot.id}`, { data: { engine: 'model' } }));
+  }
 }

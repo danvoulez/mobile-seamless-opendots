@@ -1,9 +1,9 @@
 'use client';
 
 // The card that creates an assistant: its name, what it's for, the model it
-// calls, and whether it chats or codes (a coding assistant runs on OpenCode in
-// a project folder on this computer). Creating it on the server is the
-// caller's job (onCreate).
+// calls, and whether it has tools (it replies through OpenCode, in a project
+// folder on this computer: the default) or replies with text only. Creating it
+// on the server is the caller's job (onCreate).
 
 import React, { useEffect, useRef, useState } from 'react';
 import { FiChevronDown } from 'react-icons/fi';
@@ -21,7 +21,7 @@ export default function NewAssistantDialog({ isOpen, onClose, onCreate, models, 
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
   const [model, setModel] = useState('');
-  const [engine, setEngine] = useState('model');
+  const [engine, setEngine] = useState('opencode');
   const [projectDir, setProjectDir] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -34,7 +34,7 @@ export default function NewAssistantDialog({ isOpen, onClose, onCreate, models, 
     setName('');
     setRole('');
     setModel(initialModel(models, recentIds, defaultModel));
-    setEngine('model');
+    setEngine('opencode');
     setProjectDir('');
     setMenuOpen(false);
     setError('');
@@ -108,7 +108,7 @@ export default function NewAssistantDialog({ isOpen, onClose, onCreate, models, 
         <div className="space-y-1.5">
           <span className="block text-[11px] font-medium text-zinc-400">Kind</span>
           <div className="grid grid-cols-2 gap-1 p-1 bg-[#141417] border border-[#2c2c33] rounded-lg" role="radiogroup" aria-label="Kind">
-            {[['model', 'Chat'], ['opencode', 'Coding']].map(([value, label]) => (
+            {[['opencode', 'Tools'], ['model', 'Text only']].map(([value, label]) => (
               <button
                 key={value}
                 type="button"
@@ -125,7 +125,7 @@ export default function NewAssistantDialog({ isOpen, onClose, onCreate, models, 
           </div>
           {engine === 'opencode' && (
             <p className="text-[11px] text-zinc-500">
-              Reads, edits and runs code with OpenCode on this computer. It asks before changing files or running commands.
+              Reads and edits files, runs commands and searches the web with OpenCode on this computer. It asks before changing anything.
             </p>
           )}
         </div>

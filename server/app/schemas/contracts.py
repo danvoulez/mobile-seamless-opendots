@@ -13,9 +13,10 @@ class Bot(BaseModel):
     accent_color: str = "cyan"
     system_prompt: str
     tools: List[str] = Field(default_factory=list)
-    # "model": replies come straight from the model. "opencode": a coding
-    # assistant; OpenCode works in project_dir (services/coding_agent.py).
-    engine: Literal["model", "opencode"] = "model"
+    # "opencode" (every assistant unless told otherwise): replies come through
+    # OpenCode, with its tools, working in project_dir. "model": text only,
+    # straight from the model (services/coding_agent.py).
+    engine: Literal["model", "opencode"] = "opencode"
     project_dir: str = ""
     pinned: bool = False
     unread_count: int = 0

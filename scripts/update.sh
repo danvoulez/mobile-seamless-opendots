@@ -82,12 +82,17 @@ BUILD_DIRS=".next out"
 prepare_version() {
   local dir
   for dir in $BUILD_DIRS node_modules; do rm -rf "$ROOT/client/$dir.previous"; done
+  rm -rf "$ROOT/agent/node_modules.previous"
   setup_server || return 1
   if [ -f "$ROOT/client/package-lock.json" ] && ! cmp -s "$ROOT/client/package-lock.json" "$ROOT/client/node_modules/.open-dots-lock"; then
     [ -d "$ROOT/client/node_modules" ] && mv "$ROOT/client/node_modules" "$ROOT/client/node_modules.previous"
   fi
   setup_client_modules || return 1
-  setup_agent
+  # The same for OpenCode: a new version of it keeps the previous one aside.
+  if [ -f "$ROOT/agent/package-lock.json" ] && ! cmp -s "$ROOT/agent/package-lock.json" "$ROOT/agent/node_modules/.open-dots-lock"; then
+    [ -d "$ROOT/agent/node_modules" ] && mv "$ROOT/agent/node_modules" "$ROOT/agent/node_modules.previous"
+  fi
+  setup_agent || return 1
   if client_needs_build; then
     for dir in $BUILD_DIRS; do
       [ -d "$ROOT/client/$dir" ] && mv "$ROOT/client/$dir" "$ROOT/client/$dir.previous"
@@ -105,6 +110,9 @@ restore_version() {  # commit
       rm -rf "${ROOT:?}/client/$dir" && mv "$ROOT/client/$dir.previous" "$ROOT/client/$dir"
     fi
   done
+  if [ -d "$ROOT/agent/node_modules.previous" ]; then
+    rm -rf "${ROOT:?}/agent/node_modules" && mv "$ROOT/agent/node_modules.previous" "$ROOT/agent/node_modules"
+  fi
   setup_server && setup_client
 }
 
@@ -181,6 +189,7 @@ cmd_confirm() {
   local dir
   [ "$(status_field state)" = installed ] || return 0
   for dir in $BUILD_DIRS node_modules; do rm -rf "$ROOT/client/$dir.previous"; done
+  rm -rf "$ROOT/agent/node_modules.previous"
   write_status "done" "$(status_field from)" "$(status_field to)" "Updated"
   say "Open Dots updated to $(status_field to | cut -c1-7)."
 }

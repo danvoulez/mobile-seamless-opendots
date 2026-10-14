@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.services.action_gateway import (
@@ -24,11 +24,14 @@ from app.services.action_gateway import (
 )
 from app.services.approval_broker import approval_broker
 from app.services.coding_agent import (
-    CodingAgentError, coding_agent, coding_instructions, project_dir_for, project_plugins,
+    CodingAgentError, coding_agent, coding_instructions, opencode_can_reply, project_dir_for, project_plugins,
+    uses_opencode,
 )
 from app.services.connector_actions import ConnectorCommandError, parse_connector_command
 from app.services.event_bus import EventBus, event_bus
-from app.services.model_context import assistant_instructions, model_messages, with_turn_context
+from app.services.model_context import (
+    assistant_instructions, earlier_conversation, model_messages, open_dots_note, with_turn_context,
+)
 from app.services.provider_service import provider_service
 from app.services.search_actions import SearchCommandError, parse_search_command
 from app.services.storage_service import StorageService, local_now, storage_service
@@ -117,7 +120,7 @@ class TurnService:
         self.bus = bus
         self.provider = provider
         self.gateway = gateway
-        self.coding = coding  # OpenCode, for coding assistants (None: the shared one)
+        self.coding = coding  # OpenCode, the assistants' tools (None: the shared one)
         self.active: Dict[str, TurnState] = {}
         # The last finished turn per conversation, so a client that opens the
         # conversation afterwards still sees its approval and tool cards.
@@ -217,7 +220,9 @@ class TurnService:
             self.publish_thread(state.thread_id)
 
     async def _run_turn(self, state: TurnState, bot: Optional[Dict[str, Any]]) -> None:
-        if (bot or {}).get("engine") == "opencode":
+        # Every assistant replies through OpenCode, with its tools, unless it is
+        # set to text only or the provider in Settings is one OpenCode can't use.
+        if uses_opencode(bot) and opencode_can_reply(self.storage.get_settings()):
             await CodingTurn(self, state, bot, self.coding).run()
             return
         stored = self.storage.get_messages(thread_id=state.thread_id)
@@ -418,8 +423,8 @@ def tool_subject(tool: str, data: Dict[str, Any]) -> str:
 
 
 class CodingTurn:
-    """One reply from a coding assistant: the person's message goes to OpenCode,
-    and OpenCode's events come back as this turn's text, steps and approvals."""
+    """One reply through OpenCode: the person's message goes to OpenCode, and
+    OpenCode's events come back as this turn's text, steps and approvals."""
 
     def __init__(self, turns: "TurnService", state: TurnState, bot: Dict[str, Any], agent: Any = None):
         self.turns = turns
@@ -457,17 +462,26 @@ class CodingTurn:
                     + ". Remove them (or choose another project folder), then send your message again."
                 )
             await self.agent.ensure_running()
-            self.session_id = await self._session()
+            self.session_id, new_session = await self._session()
         except (CodingAgentError, OSError) as exc:
             self._say(str(exc))
             self.turns._finish(state, ok=False)
             return
+
+        # What the model needs besides the person's words: the conversation so
+        # far when OpenCode's session is new (it remembers from then on), and
+        # the result of a command such as /search, which Open Dots runs itself.
+        context = [earlier_conversation(stored)] if new_session else []
+        action_note = await self.turns._run_action(state, latest.get("text") or "")
+        if action_note:
+            context.append(open_dots_note([action_note]))
 
         events = self.agent.listen(self.session_id)
         try:
             await self.agent.prompt(
                 self.session_id, self.directory, latest.get("text") or "", latest.get("image_url"),
                 self.agent.model(state.model), coding_instructions(self.bot, Path(self.directory)),
+                context="\n\n".join(part for part in context if part),
             )
             await self._follow(events)
         except asyncio.CancelledError:
@@ -483,19 +497,20 @@ class CodingTurn:
             self._say(self.error)
         self.turns._finish(state, ok=not self.error, usage=self._total_usage())
 
-    async def _session(self) -> str:
-        """The OpenCode session behind this conversation, made on its first reply."""
+    async def _session(self) -> Tuple[str, bool]:
+        """The OpenCode session behind this conversation, made on its first
+        reply through OpenCode; and whether it was just made."""
         thread = self.turns.storage.get_thread(self.state.thread_id) or {}
         session_id = thread.get("opencode_session_id")
         if session_id and thread.get("opencode_directory") == self.directory:
             if await self.agent.session_exists(session_id, self.directory):
-                return session_id
+                return session_id, False
         session_id = await self.agent.create_session(self.directory, thread.get("title") or "")
         if thread:
             thread["opencode_session_id"] = session_id
             thread["opencode_directory"] = self.directory
             self.turns.storage.save_thread(thread)
-        return session_id
+        return session_id, True
 
     async def _abort(self) -> None:
         try:

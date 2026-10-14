@@ -43,7 +43,7 @@ async def create_bot(bot_data: Dict[str, Any]):
         "accent_color": bot_data.get("accent_color", "#3b82f6"),
         "system_prompt": bot_data.get("system_prompt", "You are a helpful AI assistant."),
         "tools": bot_data.get("tools", []),
-        "engine": bot_data.get("engine", "model"),
+        "engine": bot_data.get("engine", "opencode"),
         "project_dir": bot_data.get("project_dir", ""),
         "pinned": False,
         "unread_count": 0,

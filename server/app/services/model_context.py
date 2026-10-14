@@ -87,6 +87,11 @@ def model_messages(stored: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return messages
 
 
+def open_dots_note(lines: List[str]) -> str:
+    """Facts Open Dots adds for the model, marked so it never takes them for the person's words."""
+    return "From Open Dots, not written by the person:\n" + "\n".join(f"- {line}" for line in lines)
+
+
 def with_turn_context(messages: List[Dict[str, Any]], now: datetime, action_note: str = "") -> List[Dict[str, Any]]:
     """Adds this turn's facts to the person's latest message, the end of the request."""
     if not messages or messages[-1]["role"] != "user":
@@ -94,7 +99,35 @@ def with_turn_context(messages: List[Dict[str, Any]], now: datetime, action_note
     lines = [f"Now: {now.strftime('%A, %d %B %Y, %H:%M')} {now.strftime('%Z')}".rstrip()]
     if action_note:
         lines.append(action_note)
-    context = "\n".join(f"- {line}" for line in lines)
     last = messages[-1]
-    content = f"{last['content']}\n\n---\nFrom Open Dots, not written by the person:\n{context}"
+    content = f"{last['content']}\n\n---\n{open_dots_note(lines)}"
     return [*messages[:-1], {**last, "content": content}]
+
+
+# A conversation carried into a new OpenCode session is cut to its newest part
+# past this many characters; OpenCode keeps (and compacts) context from then on.
+EARLIER_CONVERSATION_MAX = 40_000
+
+
+def earlier_conversation(stored: List[Dict[str, Any]]) -> str:
+    """The conversation before the person's latest message, as text for a new
+    OpenCode session.
+
+    OpenCode remembers a conversation in its own session. One that started
+    without OpenCode (an assistant that replied straight from the model before),
+    or whose session is gone, would otherwise lose everything said so far.
+    """
+    latest = max((i for i, m in enumerate(stored) if m.get("sender") == "user"), default=None)
+    if latest is None:
+        return ""
+    lines = []
+    for message in model_messages(stored[:latest]):
+        speaker = "The person" if message["role"] == "user" else "You"
+        if message["content"].strip():
+            lines.append(f"{speaker}: {message['content'].strip()}")
+    if not lines:
+        return ""
+    text = "\n\n".join(lines)
+    if len(text) > EARLIER_CONVERSATION_MAX:
+        text = f"{EARLIER_LEFT_OUT}\n\n…{text[-EARLIER_CONVERSATION_MAX:]}"
+    return f"This conversation so far, before the person's message below:\n\n{text}"

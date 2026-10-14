@@ -7,7 +7,9 @@ from app.services.model_context import (
     MAX_HISTORY,
     PHOTO_KEPT_FOR,
     PHOTO_SENT_EARLIER,
+    EARLIER_CONVERSATION_MAX,
     assistant_instructions,
+    earlier_conversation,
     history_start,
     model_messages,
     with_turn_context,
@@ -103,6 +105,37 @@ class TurnContextTests(unittest.TestCase):
     def test_nothing_is_added_when_the_person_did_not_speak_last(self):
         messages = [{"role": "assistant", "content": "hello", "image_url": None}]
         self.assertEqual(with_turn_context(messages, self.NOW), messages)
+
+
+
+class EarlierConversationTests(unittest.TestCase):
+    """What a new OpenCode session is told about a conversation already under way."""
+
+    def test_everything_before_the_persons_latest_message(self):
+        stored = [
+            {"sender": "user", "text": "What's in Lisbon in May?"},
+            {"sender": "bot", "text": "Festivals and warm days."},
+            {"sender": "bot", "text": "Failed", "is_error": True},
+            {"sender": "user", "text": "Book me a table"},
+        ]
+        text = earlier_conversation(stored)
+        self.assertIn("The person: What's in Lisbon in May?", text)
+        self.assertIn("You: Festivals and warm days.", text)
+        self.assertNotIn("Failed", text)  # replies that failed aren't part of it
+        self.assertNotIn("Book me a table", text)  # the latest message goes on its own
+
+    def test_a_first_message_has_nothing_before_it(self):
+        self.assertEqual(earlier_conversation([{"sender": "user", "text": "hi"}]), "")
+        self.assertEqual(earlier_conversation([]), "")
+
+    def test_a_long_conversation_keeps_its_newest_part(self):
+        stored = [{"sender": "user" if i % 2 == 0 else "bot", "text": f"m{i} " + "x" * 2000} for i in range(40)]
+        stored.append({"sender": "user", "text": "latest"})
+        text = earlier_conversation(stored)
+        self.assertIn(EARLIER_LEFT_OUT, text)
+        self.assertIn("m39 ", text)
+        self.assertNotIn("m0 ", text)
+        self.assertLess(len(text), EARLIER_CONVERSATION_MAX + 500)
 
 
 if __name__ == "__main__":

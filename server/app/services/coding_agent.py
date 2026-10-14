@@ -1,8 +1,10 @@
-"""Coding assistants: OpenCode, run by this computer and driven over its API.
+"""Assistants' tools: OpenCode, run by this computer and driven over its API.
 
-A coding assistant hands each reply to OpenCode (https://opencode.ai), which
-brings the coding tools: reading and editing files, running commands,
-searching code, and so on. Open Dots starts one `opencode serve` process on
+An assistant hands each reply to OpenCode (https://opencode.ai), which brings
+the tools: reading and editing files, running commands, searching code and the
+web, keeping a to-do list, and so on. That is every assistant unless it is set
+to text only (engine "model"), and only with a provider OpenCode can talk to
+(opencode_can_reply). Open Dots starts one `opencode serve` process on
 loopback with a password only it knows, writes its configuration (the model
 provider from Settings, and "ask before acting" for everything that changes
 something), and follows its event stream. turn_service turns those events into
@@ -86,8 +88,35 @@ CODING_NOTES = (
     "iPhone; your replies are shown as Markdown. Answer in the language the "
     "person writes in. Actions that change something wait until the person "
     "approves them on one of their devices; if one is rejected, don't retry "
-    "it the same way."
+    "it the same way. When the person runs a command such as /search, Open "
+    "Dots runs it and gives you the result with their message."
 )
+
+
+def uses_opencode(bot: Optional[Dict[str, Any]]) -> bool:
+    """Whether an assistant replies through OpenCode (with its tools) or straight from the model.
+
+    OpenCode is the default: an assistant replies straight from the model only
+    when it says so (engine "model", text only).
+    """
+    return (bot or {}).get("engine", "opencode") != "model"
+
+
+def opencode_can_reply(app_settings: Any) -> bool:
+    """Whether OpenCode can talk to the model provider in Settings.
+
+    OpenCode speaks OpenAI's API, and has a provider of its own for Vercel AI
+    Gateway. A provider set to the Responses API is such a service; one on the
+    original prediction adapter isn't, and its assistants reply straight from
+    the model, without tools.
+    """
+    getter = getattr(app_settings, "get", None)
+    if not callable(getter):
+        return False
+    if getter("model_api_wire_api") == "responses":
+        return True
+    base_url = getter("model_api_base_url") or settings.MODEL_API_BASE_URL
+    return isinstance(base_url, str) and _is_vercel(base_url)
 
 
 def enforced_config() -> Dict[str, Any]:
@@ -291,7 +320,7 @@ class OpenCodeAgent:
     async def ensure_running(self) -> None:
         """Start OpenCode, or restart it after the model provider changed (when no reply is running)."""
         async with self._lock:
-            coding_models = [bot.get("model") for bot in self.storage.get_bots() if bot.get("engine") == "opencode"]
+            coding_models = [bot.get("model") for bot in self.storage.get_bots() if uses_opencode(bot)]
             prepared = build_config(self.storage.get_settings(), coding_models)
             digest = hashlib.sha256(json.dumps(prepared, sort_keys=True).encode()).hexdigest()
             if self._running() and (digest == self.digest or self._listeners):
@@ -515,7 +544,10 @@ class OpenCodeAgent:
         return session["id"]
 
     async def prompt(self, session_id: str, directory: str, text: str, image_url: Optional[str],
-                     model: Dict[str, str], system: str = "") -> None:
+                     model: Dict[str, str], system: str = "", context: str = "") -> None:
+        """Send the person's message. `context` is text from Open Dots for the
+        model (the conversation so far, a command's result): it goes first, as a
+        synthetic part, so OpenCode doesn't show it as something the person wrote."""
         parts: List[Dict[str, Any]] = []
         if text:
             parts.append({"type": "text", "text": text})
@@ -525,6 +557,8 @@ class OpenCodeAgent:
             parts.append({"type": "file", "mime": mime, "url": image_url, "filename": "photo"})
         if not parts:
             parts.append({"type": "text", "text": "(empty message)"})
+        if context:
+            parts.insert(0, {"type": "text", "text": context, "synthetic": True})
         body: Dict[str, Any] = {"parts": parts, "model": model}
         if system:
             body["system"] = system
