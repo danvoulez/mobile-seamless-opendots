@@ -49,6 +49,7 @@ class FakeAgent:
         self.created = 0
         self.aborted = 0
         self.fail_start = None
+        self.fail_prompt = None
         self.replied = asyncio.Event()
 
     def model(self, model):
@@ -74,6 +75,8 @@ class FakeAgent:
         return SESSION
 
     async def prompt(self, session_id, directory, text, image_url, model, system="", context=""):
+        if self.fail_prompt:
+            raise CodingAgentError(self.fail_prompt)
         self.prompts.append({"text": text, "image_url": image_url, "model": model, "directory": directory,
                              "system": system, "context": context})
         asyncio.get_running_loop().create_task(self._play())
@@ -362,6 +365,20 @@ class EveryAssistantTests(unittest.IsolatedAsyncioTestCase):
         await self.reply("bot-default", "And her age?")
         self.assertEqual(self.agent.created, 1)
         self.assertEqual(self.agent.prompts[1]["context"], "")
+
+    async def test_a_session_is_kept_only_once_opencode_has_the_message(self):
+        self.storage.save_thread({"id": "thr-1", "bot_id": "bot-default", "title": "", "created_at": "now"})
+        self.storage.add_message({"id": "m-old", "thread_id": "thr-1", "bot_id": "bot-default",
+                                  "sender": "user", "text": "My cat is called Lua.", "created_at": "now"})
+        self.agent.fail_prompt = "OpenCode didn't answer."
+        failed = await self.reply("bot-default", "Hello?")
+        self.assertTrue(failed["is_error"])
+        self.assertNotIn("opencode_session_id", self.storage.get_thread("thr-1"))
+        # The next message starts again and still sends the conversation so far.
+        self.agent.fail_prompt = None
+        await self.reply("bot-default", "What's my cat called?")
+        self.assertIn("My cat is called Lua.", self.agent.prompts[0]["context"])
+        self.assertEqual(self.storage.get_thread("thr-1")["opencode_session_id"], SESSION)
 
     async def test_a_command_runs_and_its_result_goes_with_the_message(self):
         message = await self.reply("bot-default", "/search open dots")

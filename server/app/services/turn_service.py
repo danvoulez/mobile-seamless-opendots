@@ -483,6 +483,10 @@ class CodingTurn:
                 self.agent.model(state.model), coding_instructions(self.bot, Path(self.directory)),
                 context="\n\n".join(part for part in context if part),
             )
+            if new_session:
+                # Only now: if the prompt never reached OpenCode, the next
+                # message makes a session again and sends the conversation.
+                self._keep_session()
             await self._follow(events)
         except asyncio.CancelledError:
             await self._abort()
@@ -499,18 +503,21 @@ class CodingTurn:
 
     async def _session(self) -> Tuple[str, bool]:
         """The OpenCode session behind this conversation, made on its first
-        reply through OpenCode; and whether it was just made."""
+        reply through OpenCode; and whether it was just made (_keep_session
+        records it once OpenCode has the message)."""
         thread = self.turns.storage.get_thread(self.state.thread_id) or {}
         session_id = thread.get("opencode_session_id")
         if session_id and thread.get("opencode_directory") == self.directory:
             if await self.agent.session_exists(session_id, self.directory):
                 return session_id, False
-        session_id = await self.agent.create_session(self.directory, thread.get("title") or "")
+        return await self.agent.create_session(self.directory, thread.get("title") or ""), True
+
+    def _keep_session(self) -> None:
+        thread = self.turns.storage.get_thread(self.state.thread_id)
         if thread:
-            thread["opencode_session_id"] = session_id
+            thread["opencode_session_id"] = self.session_id
             thread["opencode_directory"] = self.directory
             self.turns.storage.save_thread(thread)
-        return session_id, True
 
     async def _abort(self) -> None:
         try:
