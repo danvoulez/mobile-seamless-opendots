@@ -1,4 +1,4 @@
-"""End to end: a coding assistant on the real, pinned OpenCode.
+"""End to end: assistants on the real, pinned OpenCode.
 
 Starts the stand-in model and an Open Dots server, creates a coding assistant,
 asks it to make a file, approves the command it wants to run (as a phone
@@ -172,8 +172,68 @@ def main() -> None:
         check("You write code." in sent, "the assistant's instructions reach the model")
         tools = {tool["function"]["name"] for tool in json.loads(sent).get("tools", [])}
         print(f"   (tools offered to the model: {', '.join(sorted(tools))})")
-        check({"bash", "edit", "read"} <= tools and not tools & {"task", "question"},
-              "the coding tools are there; subagents and questions are not")
+        check({"bash", "edit", "read", "task", "question"} <= tools,
+              "the tools are there, subagents and questions included")
+
+        # A question: it reaches the devices as a step to answer, and the answer goes back.
+        client.post(f"/api/v1/threads/{thread_id}/messages",
+                    json={"text": "Please ask me which database", "client_id": "q1"}).raise_for_status()
+        opened = events.until("request.opened", seconds=120, threadId=thread_id)
+        check(opened.get("requestType") == "question" and opened.get("summary") == "Which database?",
+              "OpenCode's question reaches the devices")
+        check([o["label"] for o in opened["questions"][0]["options"]] == ["SQLite", "Postgres"],
+              "with its choices")
+        client.post("/api/v1/approvals/respond", json={"request_id": opened["requestId"], "action": "answer",
+                                                       "answers": [["Postgres"]]}).raise_for_status()
+        resolved = events.until("request.resolved", seconds=30, threadId=thread_id)
+        check(resolved.get("answers") == [["Postgres"]], "every device hears the answer")
+        completed = events.until("turn.completed", seconds=120, threadId=thread_id)
+        check(completed.get("ok") is True and "Postgres" in completed["message"]["text"],
+              f"the answer reached the model ({completed['message']['text'][:120]!r})")
+
+        # A subagent: its command asks on the devices like any other.
+        sub_project = work / "sub-project"
+        sub_project.mkdir()
+        lead = client.post("/api/v1/bots", json={"name": "Lead", "model": "fake-coder", "project_dir": str(sub_project),
+                                                 "system_prompt": "You delegate."}).json()
+        sub_thread = client.post("/api/v1/threads", json={"bot_id": lead["id"]}).json()["id"]
+        client.post(f"/api/v1/threads/{sub_thread}/messages",
+                    json={"text": "Please use a subagent", "client_id": "s1"}).raise_for_status()
+        opened = events.until("request.opened", seconds=120, threadId=sub_thread)
+        check(opened.get("tool") == "code.bash" and "hello.txt" in (opened.get("summary") or ""),
+              "a subagent's command waits for an approval on the devices")
+        check(not (sub_project / "hello.txt").exists(), "nothing ran before the approval")
+        client.post("/api/v1/approvals/respond",
+                    json={"request_id": opened["requestId"], "action": "allow"}).raise_for_status()
+        completed = events.until("turn.completed", seconds=180, threadId=sub_thread)
+        check(completed.get("ok") is True, "the reply with a subagent finished")
+        check((sub_project / "hello.txt").exists(), "the subagent's approved command ran")
+        check("SUBTASK" not in completed["message"]["text"], "the subagent's own text isn't the reply")
+        usage = completed["message"].get("usage") or {}
+        check(usage.get("model_calls", 0) >= 3, f"the subagent's model calls are counted ({usage.get('model_calls')})")
+
+        # Every assistant has the tools: one made without choosing replies through OpenCode.
+        plain = client.post("/api/v1/bots", json={"name": "Helper", "model": "fake-coder",
+                                                  "system_prompt": "You help."}).json()
+        check(plain.get("engine") == "opencode", "a new assistant has tools (OpenCode) without asking for them")
+
+        # A conversation that began text only keeps its history when OpenCode takes over.
+        talker = client.post("/api/v1/bots", json={"name": "Talker", "model": "fake-coder", "engine": "model",
+                                                   "system_prompt": "You chat."}).json()
+        thread_id = client.post("/api/v1/threads", json={"bot_id": talker["id"]}).json()["id"]
+        client.post(f"/api/v1/threads/{thread_id}/messages",
+                    json={"text": "My cat is called MARK-LUA", "client_id": "t1"}).raise_for_status()
+        completed = events.until("turn.completed", seconds=60, threadId=thread_id)
+        check(completed.get("ok") is True and not completed["message"].get("usage", {}).get("model_calls"),
+              "a text-only assistant replies straight from the model")
+        client.put(f"/api/v1/bots/{talker['id']}", json={"engine": "opencode"}).raise_for_status()
+        client.post(f"/api/v1/threads/{thread_id}/messages",
+                    json={"text": "What is my cat called?", "client_id": "t2"}).raise_for_status()
+        completed = events.until("turn.completed", seconds=120, threadId=thread_id)
+        check(completed.get("ok") is True, "the same conversation goes on through OpenCode")
+        sent = httpx.get(f"http://127.0.0.1:{MODEL_PORT}/v1/_last_coding_request").text
+        check("MARK-LUA" in sent and "What is my cat called?" in sent,
+              "OpenCode's model gets the conversation from before OpenCode")
 
         # A project that tries to turn approvals off (say, a repo you cloned).
         hostile = work / "cloned-repo"

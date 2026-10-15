@@ -55,7 +55,7 @@ class StorageServiceTests(unittest.TestCase):
             version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()[0]
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
         with sqlite3.connect(reopened.db_path) as connection:
             owner_id = connection.execute(
                 "SELECT owner_id FROM bots WHERE id = ?", ("bot-test",)
@@ -161,6 +161,8 @@ class StorageServiceTests(unittest.TestCase):
 
         upgraded = StorageService(upgrade_root)
         self.assertEqual(upgraded.get_bots()[0]["id"], "old-bot")
+        # Assistants made before every assistant had tools move to OpenCode.
+        self.assertEqual(upgraded.get_bots()[0]["engine"], "opencode")
         with sqlite3.connect(db_path) as connection:
             version = connection.execute(
                 "SELECT MAX(version) FROM schema_migrations"
@@ -168,7 +170,7 @@ class StorageServiceTests(unittest.TestCase):
             owner_id = connection.execute(
                 "SELECT owner_id FROM bots WHERE id = 'old-bot'"
             ).fetchone()[0]
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
         self.assertEqual(owner_id, "local-user")
 
     def _write_json(self, root: Path, name: str, value):

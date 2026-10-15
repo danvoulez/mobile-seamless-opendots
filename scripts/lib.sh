@@ -144,26 +144,28 @@ build_client() {
 setup_client() {
   setup_client_modules || return 1
   if client_needs_build; then build_client || return 1; fi
-  setup_agent
+  setup_agent || return 1
 }
 
-# ----- coding assistants (OpenCode) ---------------------------------------------
+# ----- the assistants' tools (OpenCode) -----------------------------------------
 
-# The tested OpenCode version, from agent/package-lock.json. Optional: without
-# it Open Dots still starts, and coding assistants say OpenCode is missing.
+# The tested OpenCode version, from agent/package-lock.json. Every assistant
+# replies through it, so it is part of Open Dots like the web client: if it
+# can't be installed, setup fails (and an update goes back to the version
+# that worked) instead of leaving assistants without their tools.
 setup_agent() {
   (
     cd "$ROOT/agent" 2>/dev/null || exit 0
     [ -f package-lock.json ] || exit 0
     cmp -s package-lock.json node_modules/.open-dots-lock && exit 0
-    say "Installing OpenCode for coding assistants…"
+    say "Installing OpenCode, the assistants' tools…"
     if npm ci --no-audit --no-fund --loglevel=error; then
       cp package-lock.json node_modules/.open-dots-lock
     else
-      warn "Couldn't install OpenCode; coding assistants won't work until the next update."
+      warn "Couldn't install OpenCode (is this Mac online?)."
+      exit 1
     fi
   )
-  return 0
 }
 
 # ----- signing in ---------------------------------------------------------------

@@ -86,6 +86,14 @@ SCHEMA_MIGRATIONS = {
         CREATE INDEX IF NOT EXISTS idx_messages_client
         ON messages(json_extract(payload, '$.client_id'));
     """,
+    # Every assistant replies through OpenCode, with its tools: the ones made
+    # before, including those made as "Chat", move to it once. "Text only"
+    # stays available afterwards (engine "model").
+    5: """
+        UPDATE bots SET payload = json_set(payload, '$.engine', 'opencode')
+        WHERE json_valid(payload)
+          AND coalesce(json_extract(payload, '$.engine'), 'model') <> 'opencode';
+    """,
 }
 
 OWNER_TABLES = (

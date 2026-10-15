@@ -67,6 +67,7 @@ export function applyChatEvent(chat, event) {
       const approval = {
         requestId: event.requestId, tool: event.tool, summary: event.summary, arguments: event.arguments,
         always: event.always || [], status: 'pending',
+        requestType: event.requestType || 'permission', questions: event.questions || [],
       };
       return {
         ...chat,
@@ -79,7 +80,9 @@ export function applyChatEvent(chat, event) {
         ...chat,
         turn: {
           ...turn,
-          approvals: turn.approvals.map((a) => (a.requestId === event.requestId ? { ...a, status: event.decision } : a)),
+          approvals: turn.approvals.map((a) => (a.requestId === event.requestId
+            ? { ...a, status: event.decision, ...(event.answers ? { answers: event.answers } : {}) }
+            : a)),
         },
       };
     case 'turn.completed':
@@ -101,8 +104,8 @@ export function applyChatEvent(chat, event) {
 export function toolLabel(name) {
   const [family, action = ''] = String(name || '').split('.');
   if (family === 'connector') return action.startsWith('github') ? 'GitHub' : 'Apps';
-  // Coding assistants' steps (OpenCode's tools).
-  if (family === 'code') return { bash: 'Terminal', edit: 'Edit', write: 'Edit', patch: 'Edit', multiedit: 'Edit', read: 'Files', list: 'Files', glob: 'Files', grep: 'Files', webfetch: 'Web', websearch: 'Web search', task: 'Subtask' }[action] || 'Code';
+  // Steps from OpenCode, the assistants' tools.
+  if (family === 'code') return { question: 'Question', bash: 'Terminal', edit: 'Edit', write: 'Edit', patch: 'Edit', multiedit: 'Edit', read: 'Files', list: 'Files', glob: 'Files', grep: 'Files', webfetch: 'Web', websearch: 'Web search', task: 'Subtask' }[action] || 'Code';
   return { workspace: 'Files', search: 'Web search', computer: 'Computer' }[family] || 'Action';
 }
 
@@ -121,6 +124,8 @@ export function keepToolEvent(tools, event) {
 // What a step is doing: ask (waiting for you), working, done, failed or skipped.
 export function stepKind(approval, event) {
   if (approval?.status === 'pending') return 'ask';
+  // A question the person answered is done; OpenCode's question step may never report back.
+  if (approval?.status === 'answer') return 'done';
   if (approval && approval.status !== 'allow' && approval.status !== 'always') return 'skipped';
   const status = event?.type?.replace('tool.', '');
   if (!status || status === 'started') return 'working';
@@ -128,6 +133,11 @@ export function stepKind(approval, event) {
 }
 
 export function stepStatus(kind, approval) {
+  if (approval?.requestType === 'question') {
+    if (kind === 'ask') return 'Asks you';
+    if (approval.status === 'answer') return `Answered: ${(approval.answers || []).map((a) => a.join(', ')).join(' · ')}`;
+    if (approval.status === 'deny') return 'Not answered';
+  }
   if (kind === 'skipped') return { deny: 'Denied', expired: 'Not answered in time' }[approval?.status] || 'Skipped';
   return { ask: 'Needs your approval', working: 'Working…', done: 'Done', failed: "Didn't work" }[kind];
 }

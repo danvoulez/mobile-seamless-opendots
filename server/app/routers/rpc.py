@@ -70,7 +70,7 @@ class RpcFailure(Exception):
 
 
 def _respond_to_approval(client: Dict[str, Any], params: ApprovalDecision) -> Dict[str, Any]:
-    if not approval_broker.resolve(params.request_id, params.action):
+    if not approval_broker.resolve(params.request_id, params.action, params.answers):
         raise RpcFailure(APP_ERRORS[404], "Already answered or expired.", 404)
     return {"request_id": params.request_id, "action": params.action}
 

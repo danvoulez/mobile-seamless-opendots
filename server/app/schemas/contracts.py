@@ -13,9 +13,10 @@ class Bot(BaseModel):
     accent_color: str = "cyan"
     system_prompt: str
     tools: List[str] = Field(default_factory=list)
-    # "model": replies come straight from the model. "opencode": a coding
-    # assistant; OpenCode works in project_dir (services/coding_agent.py).
-    engine: Literal["model", "opencode"] = "model"
+    # "opencode" (every assistant unless told otherwise): replies come through
+    # OpenCode, with its tools, working in project_dir. "model": text only,
+    # straight from the model (services/coding_agent.py).
+    engine: Literal["model", "opencode"] = "opencode"
     project_dir: str = ""
     pinned: bool = False
     unread_count: int = 0
@@ -73,10 +74,26 @@ class TurnRequest(BaseModel):
 
 class ApprovalDecision(BaseModel):
     request_id: str
-    # "always": allow, and let a coding assistant do the same again without
+    # "always": allow, and let the assistant do the same again without
     # asking, from now on, in every chat about the same project folder
     # (OpenCode saves it for the project). Elsewhere it counts as "allow".
-    action: Literal["allow", "always", "deny"]
+    # "answer": the reply to a question the assistant asked, with `answers`;
+    # "deny" leaves a question unanswered.
+    action: Literal["allow", "always", "deny", "answer"]
+    # One list of chosen labels (or typed text) per question, in order.
+    answers: Optional[List[List[str]]] = None
+
+    @field_validator("answers")
+    @classmethod
+    def _answers_are_short(cls, value):
+        if value is None:
+            return value
+        if len(value) > 10 or any(len(answer) > 20 for answer in value):
+            raise ValueError("Too many answers.")
+        cleaned = [[str(item).strip()[:2000] for item in answer if str(item).strip()] for answer in value]
+        if not any(cleaned):
+            raise ValueError("Choose an answer.")
+        return cleaned
 
 
 class ActionRequest(BaseModel):

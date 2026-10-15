@@ -1,8 +1,10 @@
-"""Coding assistants: OpenCode, run by this computer and driven over its API.
+"""Assistants' tools: OpenCode, run by this computer and driven over its API.
 
-A coding assistant hands each reply to OpenCode (https://opencode.ai), which
-brings the coding tools: reading and editing files, running commands,
-searching code, and so on. Open Dots starts one `opencode serve` process on
+An assistant hands each reply to OpenCode (https://opencode.ai), which brings
+the tools: reading and editing files, running commands, searching code and the
+web, keeping a to-do list, and so on. That is every assistant unless it is set
+to text only (engine "model"), and only with a provider OpenCode can talk to
+(opencode_can_reply). Open Dots starts one `opencode serve` process on
 loopback with a password only it knows, writes its configuration (the model
 provider from Settings, and "ask before acting" for everything that changes
 something), and follows its event stream. turn_service turns those events into
@@ -60,12 +62,11 @@ PERMISSIONS: Dict[str, Any] = {
     "websearch": "ask",
     "external_directory": "ask",
     "doom_loop": "ask",
-    # Subagents work in sessions of their own, whose approvals no device would
-    # see, and they multiply what a reply costs. The question tool waits for
-    # an answer through a channel Open Dots doesn't offer; the assistant asks
-    # in its reply instead.
-    "task": "deny",
-    "question": "deny",
+    # Subagents work in sessions of their own; Open Dots follows those too, so
+    # what they want to do asks on the person's devices like anything else.
+    "task": "allow",
+    # Questions with choices reach every device as a step to answer.
+    "question": "allow",
 }
 
 # Instruction files a project may keep for coding agents, the first one found
@@ -86,8 +87,35 @@ CODING_NOTES = (
     "iPhone; your replies are shown as Markdown. Answer in the language the "
     "person writes in. Actions that change something wait until the person "
     "approves them on one of their devices; if one is rejected, don't retry "
-    "it the same way."
+    "it the same way. When the person runs a command such as /search, Open "
+    "Dots runs it and gives you the result with their message."
 )
+
+
+def uses_opencode(bot: Optional[Dict[str, Any]]) -> bool:
+    """Whether an assistant replies through OpenCode (with its tools) or straight from the model.
+
+    OpenCode is the default: an assistant replies straight from the model only
+    when it says so (engine "model", text only).
+    """
+    return (bot or {}).get("engine", "opencode") != "model"
+
+
+def opencode_can_reply(app_settings: Any) -> bool:
+    """Whether OpenCode can talk to the model provider in Settings.
+
+    OpenCode speaks OpenAI's API, and has a provider of its own for Vercel AI
+    Gateway. A provider set to the Responses API is such a service; one on the
+    original prediction adapter isn't, and its assistants reply straight from
+    the model, without tools.
+    """
+    getter = getattr(app_settings, "get", None)
+    if not callable(getter):
+        return False
+    if getter("model_api_wire_api") == "responses":
+        return True
+    base_url = getter("model_api_base_url") or settings.MODEL_API_BASE_URL
+    return isinstance(base_url, str) and _is_vercel(base_url)
 
 
 def enforced_config() -> Dict[str, Any]:
@@ -144,6 +172,17 @@ def project_plugins(directory: Path) -> List[Path]:
 def agent_environment(base: Dict[str, str]) -> Dict[str, str]:
     """The environment OpenCode starts with: no Open Dots credentials, no provider key."""
     return {key: value for key, value in base.items() if key in ENV_KEPT or key.startswith("LC_")}
+
+
+def event_session(event: Dict[str, Any]) -> Optional[str]:
+    """The OpenCode session an event belongs to."""
+    properties = event.get("properties") or {}
+    session_id = properties.get("sessionID")
+    if not session_id and isinstance(properties.get("info"), dict):
+        session_id = properties["info"].get("sessionID")
+    if not session_id and isinstance(properties.get("part"), dict):
+        session_id = properties["part"].get("sessionID")
+    return session_id
 
 
 class CodingAgentError(Exception):
@@ -272,6 +311,9 @@ class OpenCodeAgent:
         self.client: Optional[httpx.AsyncClient] = None
         self._lock = asyncio.Lock()
         self._listeners: Dict[str, Set[asyncio.Queue]] = {}
+        # Subagents' sessions and the session that started each one, so their
+        # events (approvals, questions, steps, costs) reach that reply too.
+        self._parents: Dict[str, str] = {}
         self._events_task: Optional[asyncio.Task] = None
         self._connected = asyncio.Event()
 
@@ -291,7 +333,7 @@ class OpenCodeAgent:
     async def ensure_running(self) -> None:
         """Start OpenCode, or restart it after the model provider changed (when no reply is running)."""
         async with self._lock:
-            coding_models = [bot.get("model") for bot in self.storage.get_bots() if bot.get("engine") == "opencode"]
+            coding_models = [bot.get("model") for bot in self.storage.get_bots() if uses_opencode(bot)]
             prepared = build_config(self.storage.get_settings(), coding_models)
             digest = hashlib.sha256(json.dumps(prepared, sort_keys=True).encode()).hexdigest()
             if self._running() and (digest == self.digest or self._listeners):
@@ -443,14 +485,18 @@ class OpenCodeAgent:
                 self._listeners.pop(session_id, None)
 
     def _dispatch(self, event: Dict[str, Any]) -> None:
-        properties = event.get("properties") or {}
-        session_id = properties.get("sessionID")
-        if not session_id and isinstance(properties.get("info"), dict):
-            session_id = properties["info"].get("sessionID")
-        if not session_id and isinstance(properties.get("part"), dict):
-            session_id = properties["part"].get("sessionID")
-        for queue in list(self._listeners.get(session_id, ())):
-            queue.put_nowait(event)
+        session_id = event_session(event)
+        if event.get("type") in ("session.created", "session.updated"):
+            info = (event.get("properties") or {}).get("info") or {}
+            if info.get("id") and info.get("parentID"):
+                self._parents[info["id"]] = info["parentID"]
+        # The session itself, then each one above it: a reply hears its subagents.
+        seen: Set[str] = set()
+        while session_id and session_id not in seen:
+            seen.add(session_id)
+            for queue in list(self._listeners.get(session_id, ())):
+                queue.put_nowait(event)
+            session_id = self._parents.get(session_id)
 
     def _broadcast(self, event: Dict[str, Any]) -> None:
         for queues in list(self._listeners.values()):
@@ -515,7 +561,10 @@ class OpenCodeAgent:
         return session["id"]
 
     async def prompt(self, session_id: str, directory: str, text: str, image_url: Optional[str],
-                     model: Dict[str, str], system: str = "") -> None:
+                     model: Dict[str, str], system: str = "", context: str = "") -> None:
+        """Send the person's message. `context` is text from Open Dots for the
+        model (the conversation so far, a command's result): it goes first, as a
+        synthetic part, so OpenCode doesn't show it as something the person wrote."""
         parts: List[Dict[str, Any]] = []
         if text:
             parts.append({"type": "text", "text": text})
@@ -525,6 +574,8 @@ class OpenCodeAgent:
             parts.append({"type": "file", "mime": mime, "url": image_url, "filename": "photo"})
         if not parts:
             parts.append({"type": "text", "text": "(empty message)"})
+        if context:
+            parts.insert(0, {"type": "text", "text": context, "synthetic": True})
         body: Dict[str, Any] = {"parts": parts, "model": model}
         if system:
             body["system"] = system
@@ -535,6 +586,12 @@ class OpenCodeAgent:
 
     async def reply_permission(self, request_id: str, directory: str, reply: str) -> None:
         await self._request("POST", f"/permission/{request_id}/reply", directory, {"reply": reply})
+
+    async def reply_question(self, request_id: str, directory: str, answers: List[List[str]]) -> None:
+        await self._request("POST", f"/question/{request_id}/reply", directory, {"answers": answers})
+
+    async def reject_question(self, request_id: str, directory: str) -> None:
+        await self._request("POST", f"/question/{request_id}/reject", directory)
 
 
 coding_agent = OpenCodeAgent()

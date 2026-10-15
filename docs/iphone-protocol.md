@@ -69,7 +69,7 @@ Other plain HTTP calls: `POST /api/v1/upload` (multipart photo, returns
 | `threads.create` | `bot_id`, `title?` | Chat summary |
 | `threads.rename` | `thread_id`, `title` | Chat summary |
 | `messages.send` | `thread_id` **or** `bot_id`, `text`, `image_url?`, `model?`, `client_id?` | `{thread, message, turn, duplicate?}` |
-| `approvals.respond` | `request_id`, `action` (`allow`, `always` or `deny`) | `{request_id, action}` |
+| `approvals.respond` | `request_id`, `action` (`allow`, `always` or `deny`; for a question, `answer` with `answers`, or `deny` to skip it), `answers?` (one list of chosen labels or typed text per question) | `{request_id, action}` |
 
 `messages.send` with a `bot_id` and no `thread_id` starts a new chat and
 sends its first message in one call.
@@ -95,9 +95,9 @@ its `threadId`.
 | `message.created` | `message` | Includes `client_id` for messages you sent |
 | `turn.started` | `turnId`, `botMsgId`, `model` | A reply began |
 | `content.delta` | `botMsgId`, `delta`, `offset` | `offset` is where `delta` starts in the reply text |
-| `request.opened` | `requestId`, `tool`, `summary`, `arguments`, `always?` | Approval needed. `always` (coding assistants) lists what **Always** would allow from then on, in every chat about the same project folder; offer it only when present, and say that |
-| `request.resolved` | `requestId`, `decision` | `allow`, `always`, `deny` or `expired` |
-| `tool.started`, `tool.completed`, `tool.failed`, `tool.denied`, `tool.expired` | `tool`, `requestId?`, `action?`, `result?`, `error?` | One step per `requestId`: a later event updates the step, and an approval with the same `requestId` belongs to that step. The `turn` snapshot keeps the latest 30 steps in `tools`. Coding assistants' steps are named `code.<tool>` (`code.bash`, `code.edit`, …) |
+| `request.opened` | `requestId`, `tool`, `summary`, `arguments`, `always?`, `requestType?`, `questions?` | Approval needed. `always` (steps from OpenCode) lists what **Always** would allow from then on, in every chat about the same project folder; offer it only when present, and say that. With `requestType: "question"` the assistant asks the person to choose instead: `questions` is a list of `{question, header, options: [{label, description}], multiple, custom}` (`custom`: typing an answer is allowed); answer with `approvals.respond` and `action: "answer"` |
+| `request.resolved` | `requestId`, `decision`, `answers?` | `allow`, `always`, `deny` or `expired`; `answer` with the `answers` for a question |
+| `tool.started`, `tool.completed`, `tool.failed`, `tool.denied`, `tool.expired` | `tool`, `requestId?`, `action?`, `result?`, `error?` | One step per `requestId`: a later event updates the step, and an approval with the same `requestId` belongs to that step. The `turn` snapshot keeps the latest 30 steps in `tools`. Steps from OpenCode, the assistants' tools, are named `code.<tool>` (`code.bash`, `code.edit`, …) |
 | `turn.completed` | `botMsgId`, `ok`, `message` | The stored reply; `ok: false` marks an error reply |
 | `device.linked`, `device.unlinked` | `device` / `deviceId` | |
 

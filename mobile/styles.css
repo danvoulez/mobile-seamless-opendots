@@ -487,6 +487,39 @@ input, textarea { font: inherit; color: inherit; }
 .btn-deny:active { background: var(--surface-2); }
 .btn-allow { background: var(--emerald-600); color: #fff; }
 .btn-allow:active { background: #10b981; }
+.btn-answer { background: var(--blue-600); color: #fff; }
+.btn-answer:active { background: var(--blue-500); }
+
+/* A question the assistant asks: its choices as chips, and a line to type. */
+.step-question { margin-top: 10px; }
+.question + .question { margin-top: 14px; }
+.question-text { margin: 0 0 8px; color: var(--zinc-200); font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
+.question-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
+  color: var(--zinc-300);
+  font-size: 14px;
+  font-weight: 600;
+}
+.chip:active { background: var(--surface-2); }
+.chip-on { border-color: rgba(96, 165, 250, 0.4); background: rgba(59, 130, 246, 0.15); color: var(--zinc-100); }
+.chip:disabled { opacity: 0.5; }
+.question-input {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--input-border);
+  background: var(--input);
+  color: var(--text);
+  font-size: 16px; /* 16px keeps iOS from zooming in on focus */
+}
+.question-input:focus { outline: none; border-color: rgba(59, 130, 246, 0.6); }
 
 .step-details { margin-top: 4px; }
 .step-details summary { width: fit-content; cursor: pointer; color: var(--zinc-500); font-size: 12px; list-style-position: inside; }

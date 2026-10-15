@@ -311,11 +311,13 @@ export function subscribeToChatStream(threadId, model, onEvent, onError) {
   };
 }
 
-export async function respondApproval(requestId, action) {
+// `answers` (with action 'answer'): the reply to a question the assistant
+// asked, one list of chosen labels or typed text per question.
+export async function respondApproval(requestId, action, answers) {
   const res = await apiFetch(`${API_BASE_URL}/approvals/respond`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ request_id: requestId, action }),
+    body: JSON.stringify({ request_id: requestId, action, ...(answers ? { answers } : {}) }),
   });
   if (!res.ok) throw new Error('Failed to respond approval');
   return res.json();

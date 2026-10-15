@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.config import settings
@@ -10,7 +11,7 @@ from app.services import coding_agent as coding_module
 from app.services.approval_broker import approval_broker
 from app.services.coding_agent import (
     PERMISSIONS, CodingAgentError, agent_environment, build_config, coding_instructions, enforced_config, model_ref,
-    project_plugins, validate_project_dir,
+    opencode_can_reply, project_plugins, uses_opencode, validate_project_dir,
 )
 from app.services.event_bus import EventBus
 from app.services.storage_service import StorageService
@@ -31,9 +32,9 @@ def delta(message_id, part_id, text):
         "sessionID": SESSION, "messageID": message_id, "partID": part_id, "field": "text", "delta": text}}
 
 
-def tool(message_id, status, **state):
+def tool(message_id, status, call_id="call_1", **state):
     return {"type": "message.part.updated", "properties": {"sessionID": SESSION, "part": {
-        "id": "prt_tool", "sessionID": SESSION, "messageID": message_id, "type": "tool", "callID": "call_1",
+        "id": f"prt_{call_id}", "sessionID": SESSION, "messageID": message_id, "type": "tool", "callID": call_id,
         "tool": "bash", "state": {"status": status, "input": {"command": "npm test"}, **state}}}}
 
 
@@ -48,6 +49,7 @@ class FakeAgent:
         self.created = 0
         self.aborted = 0
         self.fail_start = None
+        self.fail_prompt = None
         self.replied = asyncio.Event()
 
     def model(self, model):
@@ -72,9 +74,11 @@ class FakeAgent:
         self.created += 1
         return SESSION
 
-    async def prompt(self, session_id, directory, text, image_url, model, system=""):
+    async def prompt(self, session_id, directory, text, image_url, model, system="", context=""):
+        if self.fail_prompt:
+            raise CodingAgentError(self.fail_prompt)
         self.prompts.append({"text": text, "image_url": image_url, "model": model, "directory": directory,
-                             "system": system})
+                             "system": system, "context": context})
         asyncio.get_running_loop().create_task(self._play())
 
     async def _play(self):
@@ -114,7 +118,9 @@ SCRIPT = [
 ]
 
 
-class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
+class CodingTurnCase(unittest.IsolatedAsyncioTestCase):
+    """A coding assistant, its project folder and a stand-in OpenCode."""
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.storage = StorageService(Path(self.directory.name))
@@ -148,6 +154,9 @@ class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(approval_broker.resolve(event["requestId"], decision))
                 return
 
+
+
+class CodingTurnTests(CodingTurnCase):
     async def test_reply_tools_approval_and_usage(self):
         self.say("run the tests")
         state = self.turns.start("thr-code", "bot-code")
@@ -255,7 +264,277 @@ class CodingTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.agent.aborted, 1)
 
 
+QUICK_REPLY = [
+    assistant("msg_q"),
+    delta("msg_q", "prt_q", "Sure."),
+    assistant("msg_q", completed=True),
+    {"type": "session.idle", "properties": {"sessionID": SESSION}},
+]
+
+
+class StraightFromTheModel:
+    """Stands in for the model provider, for assistants that reply without OpenCode."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def stream_chat_completion(self, **kwargs):
+        self.calls += 1
+        yield {"type": "content.delta", "delta": "Text only."}
+        yield {"type": "turn.completed", "ok": True}
+
+
+class SearchGateway:
+    """Stands in for the action gateway: every command runs, with a fixed result."""
+
+    def __init__(self):
+        self.opened = []
+
+    def open(self, thread_id, bot_id, call):
+        self.opened.append(call.name)
+        tool, action = call.name.split(".", 1)
+        return SimpleNamespace(request_id="req-1", tool=tool, action=action, model_dump=lambda: {}), None
+
+    async def wait_for_decision(self, request):
+        return "allow"
+
+    async def execute(self, request):
+        return SimpleNamespace(status="completed", result={"results": ["opendots.dev"]}, error=None)
+
+
+class EveryAssistantTests(unittest.IsolatedAsyncioTestCase):
+    """Every assistant replies through OpenCode, unless it is text only or the
+    provider is one OpenCode can't use."""
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.storage = StorageService(Path(self.directory.name))
+        self.storage.save_settings({"model_api_base_url": "https://provider.example/v1", "model_api_key": "key",
+                                    "model_api_wire_api": "responses"})
+        base = {key: value for key, value in self.storage.get_bots()[0].items() if key != "engine"}
+        self.storage.save_bots([
+            {**base, "id": "bot-default"},  # made before engines existed
+            {**base, "id": "bot-text", "engine": "model"},
+        ])
+        self.agent = FakeAgent(QUICK_REPLY)
+        self.provider = StraightFromTheModel()
+        self.gateway = SearchGateway()
+        self.turns = TurnService(storage=self.storage, bus=EventBus(), provider=self.provider,
+                                 gateway=self.gateway, coding=self.agent)
+        patcher = patch.object(settings, "PROJECTS_DIR", Path(self.directory.name) / "projects")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def reply(self, bot_id, text, thread_id="thr-1"):
+        if not self.storage.get_thread(thread_id):
+            self.storage.save_thread({"id": thread_id, "bot_id": bot_id, "title": "", "created_at": "now"})
+        count = len(self.storage.get_messages(thread_id=thread_id))
+        self.storage.add_message({"id": f"m-{thread_id}-{count}", "thread_id": thread_id, "bot_id": bot_id,
+                                  "sender": "user", "text": text, "created_at": "now"})
+        self.turns.start(thread_id, bot_id)
+        await asyncio.wait_for(self.turns.wait(thread_id), 5)
+        return self.storage.get_last_message(thread_id)
+
+    async def test_an_assistant_replies_through_opencode_by_default(self):
+        message = await self.reply("bot-default", "hi")
+        self.assertEqual(message["text"], "Sure.")
+        self.assertEqual(len(self.agent.prompts), 1)
+        self.assertEqual(self.provider.calls, 0)
+
+    async def test_a_text_only_assistant_replies_straight_from_the_model(self):
+        message = await self.reply("bot-text", "hi")
+        self.assertEqual(message["text"], "Text only.")
+        self.assertEqual(self.agent.prompts, [])
+
+    async def test_a_provider_opencode_cant_use_keeps_replies_straight_from_the_model(self):
+        self.storage.save_settings({"model_api_wire_api": "prediction", "model_api_base_url": "https://predict.example"})
+        message = await self.reply("bot-default", "hi")
+        self.assertEqual(message["text"], "Text only.")
+        self.assertEqual(self.agent.prompts, [])
+
+    async def test_opencode_is_told_the_conversation_so_far_once(self):
+        # A conversation that began with the assistant replying straight from the model.
+        self.storage.save_thread({"id": "thr-1", "bot_id": "bot-default", "title": "", "created_at": "now"})
+        self.storage.add_message({"id": "m-old-1", "thread_id": "thr-1", "bot_id": "bot-default",
+                                  "sender": "user", "text": "My cat is called Lua.", "created_at": "now"})
+        self.storage.add_message({"id": "m-old-2", "thread_id": "thr-1", "bot_id": "bot-default",
+                                  "sender": "bot", "text": "Lovely name!", "created_at": "now"})
+        await self.reply("bot-default", "What's my cat called?")
+        first = self.agent.prompts[0]
+        self.assertEqual(first["text"], "What's my cat called?")
+        self.assertIn("The person: My cat is called Lua.", first["context"])
+        self.assertIn("You: Lovely name!", first["context"])
+        self.assertNotIn("What's my cat called?", first["context"])
+        # The session remembers from then on: nothing is sent twice.
+        await self.reply("bot-default", "And her age?")
+        self.assertEqual(self.agent.created, 1)
+        self.assertEqual(self.agent.prompts[1]["context"], "")
+
+    async def test_a_session_is_kept_only_once_opencode_has_the_message(self):
+        self.storage.save_thread({"id": "thr-1", "bot_id": "bot-default", "title": "", "created_at": "now"})
+        self.storage.add_message({"id": "m-old", "thread_id": "thr-1", "bot_id": "bot-default",
+                                  "sender": "user", "text": "My cat is called Lua.", "created_at": "now"})
+        self.agent.fail_prompt = "OpenCode didn't answer."
+        failed = await self.reply("bot-default", "Hello?")
+        self.assertTrue(failed["is_error"])
+        self.assertNotIn("opencode_session_id", self.storage.get_thread("thr-1"))
+        # The next message starts again and still sends the conversation so far.
+        self.agent.fail_prompt = None
+        await self.reply("bot-default", "What's my cat called?")
+        self.assertIn("My cat is called Lua.", self.agent.prompts[0]["context"])
+        self.assertEqual(self.storage.get_thread("thr-1")["opencode_session_id"], SESSION)
+
+    async def test_a_command_runs_and_its_result_goes_with_the_message(self):
+        message = await self.reply("bot-default", "/search open dots")
+        self.assertEqual(self.gateway.opened, ["search.web"])
+        prompt = self.agent.prompts[0]
+        self.assertEqual(prompt["text"], "/search open dots")
+        self.assertIn("From Open Dots, not written by the person:", prompt["context"])
+        self.assertIn("Action result (search.web)", prompt["context"])
+        self.assertIn("opendots.dev", prompt["context"])
+        self.assertEqual(message["text"], "Sure.")
+        self.assertEqual([tool["type"] for tool in self.turns.recent["thr-1"].tools], ["tool.completed"])
+
+
+def child_session(child_id):
+    return {"type": "session.created", "properties": {"sessionID": child_id, "info": {
+        "id": child_id, "parentID": SESSION, "directory": "/p", "title": "subagent"}}}
+
+
+def in_session(event, session_id):
+    """The same event, from another session (a subagent's)."""
+    event = json.loads(json.dumps(event))
+    props = event["properties"]
+    props["sessionID"] = session_id
+    for key in ("info", "part"):
+        if isinstance(props.get(key), dict):
+            props[key]["sessionID"] = session_id
+    return event
+
+
+QUESTION = {"type": "question.asked", "properties": {
+    "id": "que_1", "sessionID": SESSION, "tool": {"messageID": "msg_1", "callID": "call_q"},
+    "questions": [{"question": "Which database?", "header": "Database", "multiple": False,
+                   "options": [{"label": "SQLite", "description": "One file"},
+                               {"label": "Postgres", "description": "A server"}]}]}}
+
+
+class QuestionAndSubagentTests(CodingTurnCase):
+    """OpenCode's questions and subagents, followed on every device."""
+
+    async def next_opened(self):
+        while True:
+            event = await self.events.next(timeout=5)
+            if event["type"] == "request.opened":
+                return event
+
+    async def test_a_question_reaches_every_device_and_the_answer_goes_back(self):
+        self.agent.script = [assistant("msg_1"), QUESTION, "WAIT_FOR_REPLY",
+                             delta("msg_1", "prt_a", "SQLite it is."),
+                             {"type": "session.idle", "properties": {"sessionID": SESSION}}]
+        self.agent.reply_question = self.record("question")
+        self.say("set up storage")
+        self.turns.start("thr-code", "bot-code")
+        opened = await self.next_opened()
+        self.assertEqual(opened["requestType"], "question")
+        self.assertEqual(opened["requestId"], "call_q")
+        self.assertEqual(opened["summary"], "Which database?")
+        self.assertEqual([o["label"] for o in opened["questions"][0]["options"]], ["SQLite", "Postgres"])
+        self.assertTrue(opened["questions"][0]["custom"])
+        self.assertEqual(self.turns.status("thr-code"), "waiting")
+        # A question can't be "allowed"; it is answered.
+        self.assertFalse(approval_broker.resolve("call_q", "allow"))
+        self.assertTrue(approval_broker.resolve("call_q", "answer", [["SQLite"]]))
+        await asyncio.wait_for(self.turns.wait("thr-code"), 5)
+        self.assertEqual(self.agent.replies, [("que_1", [["SQLite"]])])
+        self.assertEqual(self.storage.get_last_message("thr-code")["text"], "SQLite it is.")
+        approval = self.turns.recent["thr-code"].approvals["call_q"]
+        self.assertEqual((approval["status"], approval["answers"]), ("answer", [["SQLite"]]))
+
+    async def test_an_unanswered_question_is_rejected(self):
+        self.agent.script = [assistant("msg_1"), QUESTION, "WAIT_FOR_REPLY",
+                             {"type": "session.idle", "properties": {"sessionID": SESSION}}]
+        self.agent.reject_question = self.record("reject")
+        self.say("set up storage")
+        self.turns.start("thr-code", "bot-code")
+        opened = await self.next_opened()
+        self.assertTrue(approval_broker.resolve(opened["requestId"], "deny"))
+        await asyncio.wait_for(self.turns.wait("thr-code"), 5)
+        self.assertEqual(self.agent.replies, [("que_1", "rejected")])
+
+    async def test_a_subagents_approval_steps_and_cost_belong_to_the_reply_but_not_its_text(self):
+        child = "ses_child"
+        child_permission = in_session({"type": "permission.asked", "properties": {
+            "id": "per_c", "sessionID": child, "permission": "bash", "patterns": ["ls"],
+            "metadata": {"command": "ls"}, "always": ["ls *"], "tool": {"messageID": "msg_c", "callID": "call_c"}}}, child)
+        agent = coding_module.OpenCodeAgent(storage=self.storage, binary="/nonexistent")
+        queue = agent.listen(SESSION)
+        for event in [child_session(child),
+                      in_session(assistant("msg_c"), child),
+                      in_session(delta("msg_c", "prt_c", "subagent notes"), child),
+                      child_permission,
+                      in_session({"type": "session.idle", "properties": {"sessionID": child}}, child)]:
+            agent._dispatch(event)
+        routed = [queue.get_nowait() for _ in range(queue.qsize())]
+        self.assertEqual(len(routed), 5)  # everything a subagent does reaches the reply that started it
+
+        self.agent.script = [
+            assistant("msg_1"),
+            *routed[1:3],  # the subagent's message and its text
+            in_session(tool("msg_c", "running", call_id="call_c"), child),
+            routed[3], "WAIT_FOR_REPLY",  # its permission
+            routed[4],  # its session going idle
+            in_session(assistant("msg_c", completed=True, cost=0.5, tokens={
+                "input": 10, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}), child),
+            delta("msg_1", "prt_a", "Done."),
+            {"type": "session.idle", "properties": {"sessionID": SESSION}},
+        ]
+        self.say("look around")
+        self.turns.start("thr-code", "bot-code")
+        opened = await self.next_opened()
+        self.assertEqual(opened["requestId"], "call_c")  # the subagent's step asks on the devices
+        self.assertTrue(approval_broker.resolve("call_c", "allow"))
+        await asyncio.wait_for(self.turns.wait("thr-code"), 5)
+        message = self.storage.get_last_message("thr-code")
+        self.assertEqual(message["text"], "Done.")  # the subagent's idle didn't end the reply, its text isn't shown
+        self.assertEqual(message["usage"]["cost_usd"], 0.5)
+        self.assertEqual(self.agent.replies, [("per_c", "once")])
+        steps = {step["requestId"] for step in self.turns.recent["thr-code"].tools}
+        self.assertIn("call_c", steps)
+
+    def record(self, kind):
+        async def recorder(request_id, directory, answers=None):
+            self.agent.replies.append((request_id, answers if kind == "question" else "rejected"))
+            self.agent.replied.set()
+        return recorder
+
+
+class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_questions_take_answers_and_permissions_dont(self):
+        call = type("Call", (), {"name": "code.bash", "summary": "ls", "arguments_for_display": {}})()
+        approval_broker.open("t", "b", call, request_id="perm-1")
+        self.assertFalse(approval_broker.resolve("perm-1", "answer", [["x"]]))
+        self.assertTrue(approval_broker.resolve("perm-1", "allow"))
+        approval_broker.open("t", "b", call, request_id="q-1", kind="question")
+        self.assertFalse(approval_broker.resolve("q-1", "answer", []))
+        self.assertTrue(approval_broker.resolve("q-1", "answer", [["SQLite"]]))
+        self.assertEqual(await approval_broker.wait("q-1"), "answer")
+        self.assertEqual(approval_broker.take_answers("q-1"), [["SQLite"]])
+        self.assertIsNone(approval_broker.take_answers("q-1"))
+
+
 class ConfigTests(unittest.TestCase):
+    def test_which_assistants_and_providers_opencode_serves(self):
+        self.assertTrue(uses_opencode({}))
+        self.assertTrue(uses_opencode({"engine": "opencode"}))
+        self.assertFalse(uses_opencode({"engine": "model"}))
+        self.assertTrue(opencode_can_reply({"model_api_wire_api": "responses"}))
+        self.assertTrue(opencode_can_reply({"model_api_wire_api": "prediction",
+                                            "model_api_base_url": "https://ai-gateway.vercel.sh/v1"}))
+        self.assertFalse(opencode_can_reply({"model_api_wire_api": "prediction",
+                                             "model_api_base_url": "https://predict.example"}))
+        self.assertFalse(opencode_can_reply(None))
     def test_vercel_uses_opencodes_own_provider_and_keeps_the_key_out_of_the_environment(self):
         prepared = build_config({"model_api_base_url": "https://ai-gateway.vercel.sh/v1", "model_api_key": "vck_secret",
                                  "model_ids": ["moonshotai/kimi-k2"], "default_model": "anthropic/claude-sonnet-4.5"})
@@ -268,9 +547,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(set(config["provider"]["vercel"]["models"]), {"moonshotai/kimi-k2", "anthropic/claude-sonnet-4.5"})
         self.assertEqual(config["permission"]["*"], "ask")
         self.assertEqual(config["permission"]["read"]["*.env"], "deny")
-        # Subagent sessions and questions would wait for answers no device can give.
-        self.assertEqual(config["permission"]["task"], "deny")
-        self.assertEqual(config["permission"]["question"], "deny")
+        # Subagents and questions are on: their approvals and questions reach every device.
+        self.assertEqual(config["permission"]["task"], "allow")
+        self.assertEqual(config["permission"]["question"], "allow")
         self.assertFalse(config["autoupdate"])
         self.assertEqual(config["share"], "disabled")
 

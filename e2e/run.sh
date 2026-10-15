@@ -2,7 +2,7 @@
 # Browser end-to-end tests: the iPhone app, the Mac web client and the two
 # together, against a real Open Dots server and a stand-in model.
 #
-#   e2e/run.sh              all suites (phone, both, resilience)
+#   e2e/run.sh              all suites (phone, both, resilience, questions)
 #   e2e/run.sh phone both   some of them
 #
 # Needs the server's environment (server/.venv), the web client built
@@ -39,7 +39,8 @@ wait_for() {  # url
 }
 
 suites=("$@")
-[ ${#suites[@]} -gt 0 ] || suites=(phone both resilience)
+# questions needs OpenCode (`npm ci` in agent/): its assistant replies through it.
+[ ${#suites[@]} -gt 0 ] || suites=(phone both resilience questions)
 
 (cd "$E2E" && FAKE_DELAY="${FAKE_DELAY:-0.1}" exec "$PYTHON" -m uvicorn fake_model:app --port 9100 --log-level warning) &
 PIDS="$!"

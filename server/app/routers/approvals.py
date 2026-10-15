@@ -7,11 +7,11 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 
 @router.post("/respond")
 async def respond_approval(decision: ApprovalDecision):
-    resolved = approval_broker.resolve(decision.request_id, decision.action)
+    resolved = approval_broker.resolve(decision.request_id, decision.action, decision.answers)
     if not resolved:
         raise HTTPException(status_code=404, detail="Approval request is no longer pending")
 
-    action_text = "Denied" if decision.action == "deny" else "Allowed"
+    action_text = {"deny": "Denied", "answer": "Answered"}.get(decision.action, "Allowed")
     return {
         "status": "ok",
         "request_id": decision.request_id,

@@ -78,24 +78,49 @@ async def chat_completions(request: Request):
         return content or ""
 
     last_user = next((text_of(m) for m in reversed(messages) if m.get("role") == "user"), "")
-    ran_tool = any(m.get("role") == "tool" for m in messages)
+    # Only this request's tools count: those after the person's latest message.
+    latest = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
+    ran_tool = any(m.get("role") == "tool" for m in messages[latest + 1:])
+    tool_output = next((text_of(m) for m in reversed(messages[latest + 1:]) if m.get("role") == "tool"), "")
+    asked = last_user.lower()
+
+    async def call(name, arguments):
+        arguments = json.dumps(arguments)
+        yield _chunk({"tool_calls": [{"index": 0, "id": f"call_fake_{name}", "type": "function",
+                                      "function": {"name": name, "arguments": ""}}]})
+        for start in range(0, len(arguments), 16):
+            yield _chunk({"tool_calls": [{"index": 0, "function": {"arguments": arguments[start:start + 16]}}]})
+            await asyncio.sleep(DELAY / 4)
+        yield _chunk({}, "tool_calls", usage)
 
     async def stream():
         yield _chunk({"role": "assistant", "content": ""})
         if not body.get("tools"):
             yield _chunk({"content": "Making hello.txt"})
             yield _chunk({}, "stop", usage)
-        elif "make a file" in last_user.lower() and not ran_tool:
+        elif "make a file" in asked and not ran_tool:
             yield _chunk({"content": "I'll create it."})
-            arguments = json.dumps({"command": CODING_COMMAND, "description": "Create hello.txt"})
-            yield _chunk({"tool_calls": [{"index": 0, "id": "call_fake_1", "type": "function",
-                                          "function": {"name": "bash", "arguments": ""}}]})
-            for start in range(0, len(arguments), 16):
-                yield _chunk({"tool_calls": [{"index": 0, "function": {"arguments": arguments[start:start + 16]}}]})
-                await asyncio.sleep(DELAY / 4)
-            yield _chunk({}, "tool_calls", usage)
+            async for chunk in call("bash", {"command": CODING_COMMAND, "description": "Create hello.txt"}):
+                yield chunk
+        elif "ask me" in asked and not ran_tool:
+            # OpenCode's question tool: the person picks on their Mac or iPhone.
+            async for chunk in call("question", {"questions": [{
+                "question": "Which database?", "header": "Database",
+                "options": [{"label": "SQLite", "description": "One file"},
+                            {"label": "Postgres", "description": "A server"}]}]}):
+                yield chunk
+        elif "use a subagent" in asked and not ran_tool:
+            # A subagent in a session of its own; it makes the file, which asks for approval.
+            async for chunk in call("task", {"description": "Make the file", "subagent_type": "general",
+                                             "prompt": "SUBTASK: please make a file called hello.txt"}):
+                yield chunk
         else:
-            reply = "Done: **hello.txt** is in the project folder." if ran_tool else f"You said: {last_user[:80]}"
+            if "ask me" in asked:
+                reply = f"Noted: {tool_output[:200]}"
+            elif ran_tool:
+                reply = "Done: **hello.txt** is in the project folder."
+            else:
+                reply = f"You said: {last_user[:80]}"
             for word in reply.split(" "):
                 yield _chunk({"content": word + " "})
                 await asyncio.sleep(DELAY)

@@ -163,7 +163,7 @@ export default function AppSettingsDrawer({ models, isOpen, onClose, currentMode
                 <option value="responses">Responses API</option>
                 <option value="prediction">Prediction API (original adapter)</option>
               </select>
-              <p className="text-[11px] text-zinc-500">{wireApi === "responses" ? "Uses /responses with Bearer authentication. Chat Completions is not supported yet." : "Uses /{model_id} and prediction polling with x-api-key authentication."}</p>
+              <p className="text-[11px] text-zinc-500">{wireApi === "responses" ? "Uses /responses with Bearer authentication. Assistants get their tools from OpenCode, which uses this provider too." : "Uses /{model_id} and prediction polling with x-api-key authentication. OpenCode can't use this protocol, so assistants reply with text only, without tools."}</p>
             </div>
             <div className="space-y-1.5">
               <label htmlFor="provider-key" className="block text-xs font-medium">Inference API Key</label>

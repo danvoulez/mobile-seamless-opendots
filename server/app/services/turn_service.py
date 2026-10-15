@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.services.action_gateway import (
@@ -24,11 +24,14 @@ from app.services.action_gateway import (
 )
 from app.services.approval_broker import approval_broker
 from app.services.coding_agent import (
-    CodingAgentError, coding_agent, coding_instructions, project_dir_for, project_plugins,
+    CodingAgentError, coding_agent, coding_instructions, event_session, opencode_can_reply, project_dir_for,
+    project_plugins, uses_opencode,
 )
 from app.services.connector_actions import ConnectorCommandError, parse_connector_command
 from app.services.event_bus import EventBus, event_bus
-from app.services.model_context import assistant_instructions, model_messages, with_turn_context
+from app.services.model_context import (
+    assistant_instructions, earlier_conversation, model_messages, open_dots_note, with_turn_context,
+)
 from app.services.provider_service import provider_service
 from app.services.search_actions import SearchCommandError, parse_search_command
 from app.services.storage_service import StorageService, local_now, storage_service
@@ -117,7 +120,7 @@ class TurnService:
         self.bus = bus
         self.provider = provider
         self.gateway = gateway
-        self.coding = coding  # OpenCode, for coding assistants (None: the shared one)
+        self.coding = coding  # OpenCode, the assistants' tools (None: the shared one)
         self.active: Dict[str, TurnState] = {}
         # The last finished turn per conversation, so a client that opens the
         # conversation afterwards still sees its approval and tool cards.
@@ -217,7 +220,9 @@ class TurnService:
             self.publish_thread(state.thread_id)
 
     async def _run_turn(self, state: TurnState, bot: Optional[Dict[str, Any]]) -> None:
-        if (bot or {}).get("engine") == "opencode":
+        # Every assistant replies through OpenCode, with its tools, unless it is
+        # set to text only or the provider in Settings is one OpenCode can't use.
+        if uses_opencode(bot) and opencode_can_reply(self.storage.get_settings()):
             await CodingTurn(self, state, bot, self.coding).run()
             return
         stored = self.storage.get_messages(thread_id=state.thread_id)
@@ -418,8 +423,8 @@ def tool_subject(tool: str, data: Dict[str, Any]) -> str:
 
 
 class CodingTurn:
-    """One reply from a coding assistant: the person's message goes to OpenCode,
-    and OpenCode's events come back as this turn's text, steps and approvals."""
+    """One reply through OpenCode: the person's message goes to OpenCode, and
+    OpenCode's events come back as this turn's text, steps and approvals."""
 
     def __init__(self, turns: "TurnService", state: TurnState, bot: Dict[str, Any], agent: Any = None):
         self.turns = turns
@@ -428,11 +433,13 @@ class CodingTurn:
         self.agent = agent or coding_agent
         self.directory = ""
         self.session_id = ""
-        self.assistant_ids: set = set()
+        self.assistant_ids: set = set()  # this reply's messages in its own session
+        self.subagent_ids: set = set()  # messages from subagents it started: steps and costs, not text
         self.part_text: Dict[str, str] = {}
         self.last_part: Optional[str] = None
         self.started_tools: set = set()
         self.permission_ids: Dict[str, str] = {}  # approval request id → OpenCode permission id
+        self.question_ids: Dict[str, str] = {}  # approval request id → OpenCode question id
         self.waiters: List[asyncio.Task] = []
         self.usage: Dict[str, Dict[str, Any]] = {}  # per assistant message, its final tokens and cost
         self.error: Optional[str] = None
@@ -457,18 +464,31 @@ class CodingTurn:
                     + ". Remove them (or choose another project folder), then send your message again."
                 )
             await self.agent.ensure_running()
-            self.session_id = await self._session()
+            self.session_id, new_session = await self._session()
         except (CodingAgentError, OSError) as exc:
             self._say(str(exc))
             self.turns._finish(state, ok=False)
             return
+
+        # What the model needs besides the person's words: the conversation so
+        # far when OpenCode's session is new (it remembers from then on), and
+        # the result of a command such as /search, which Open Dots runs itself.
+        context = [earlier_conversation(stored)] if new_session else []
+        action_note = await self.turns._run_action(state, latest.get("text") or "")
+        if action_note:
+            context.append(open_dots_note([action_note]))
 
         events = self.agent.listen(self.session_id)
         try:
             await self.agent.prompt(
                 self.session_id, self.directory, latest.get("text") or "", latest.get("image_url"),
                 self.agent.model(state.model), coding_instructions(self.bot, Path(self.directory)),
+                context="\n\n".join(part for part in context if part),
             )
+            if new_session:
+                # Only now: if the prompt never reached OpenCode, the next
+                # message makes a session again and sends the conversation.
+                self._keep_session()
             await self._follow(events)
         except asyncio.CancelledError:
             await self._abort()
@@ -483,19 +503,23 @@ class CodingTurn:
             self._say(self.error)
         self.turns._finish(state, ok=not self.error, usage=self._total_usage())
 
-    async def _session(self) -> str:
-        """The OpenCode session behind this conversation, made on its first reply."""
+    async def _session(self) -> Tuple[str, bool]:
+        """The OpenCode session behind this conversation, made on its first
+        reply through OpenCode; and whether it was just made (_keep_session
+        records it once OpenCode has the message)."""
         thread = self.turns.storage.get_thread(self.state.thread_id) or {}
         session_id = thread.get("opencode_session_id")
         if session_id and thread.get("opencode_directory") == self.directory:
             if await self.agent.session_exists(session_id, self.directory):
-                return session_id
-        session_id = await self.agent.create_session(self.directory, thread.get("title") or "")
+                return session_id, False
+        return await self.agent.create_session(self.directory, thread.get("title") or ""), True
+
+    def _keep_session(self) -> None:
+        thread = self.turns.storage.get_thread(self.state.thread_id)
         if thread:
-            thread["opencode_session_id"] = session_id
+            thread["opencode_session_id"] = self.session_id
             thread["opencode_directory"] = self.directory
             self.turns.storage.save_thread(thread)
-        return session_id
 
     async def _abort(self) -> None:
         try:
@@ -528,18 +552,23 @@ class CodingTurn:
             event = await events.get()
             kind = event.get("type")
             props = event.get("properties") or {}
+            # Events from subagents' sessions arrive here too (OpenCodeAgent
+            # follows them up to this reply's session).
+            own = event_session(event) in (None, self.session_id)
             if kind == "session.idle":
-                return
+                if own:
+                    return
+                continue
             if kind == "agent.disconnected":
                 self.error = "OpenCode stopped answering before the reply finished."
                 return
             if kind == "session.error":
                 error = props.get("error") or {}
-                if error.get("name") != "MessageAbortedError":
+                if own and error.get("name") != "MessageAbortedError":
                     data = error.get("data") or {}
                     self.error = data.get("message") or error.get("name") or "OpenCode reported an error."
             elif kind == "message.updated":
-                self._message(props.get("info") or {})
+                self._message(props.get("info") or {}, own)
             elif kind == "message.part.delta":
                 if props.get("messageID") in self.assistant_ids and props.get("field") == "text":
                     part_id = props.get("partID") or ""
@@ -549,16 +578,18 @@ class CodingTurn:
                 self._part(props.get("part") or {})
             elif kind == "permission.asked":
                 self._permission(props)
+            elif kind == "question.asked":
+                self._question(props)
             elif kind == "permission.replied":
                 request_id = next((key for key, value in self.permission_ids.items() if value == props.get("requestID")), None)
                 if request_id:
                     # Answered without us (an earlier "always"): close our copy too.
                     approval_broker.resolve(request_id, "deny" if props.get("reply") == "reject" else "allow")
 
-    def _message(self, info: Dict[str, Any]) -> None:
+    def _message(self, info: Dict[str, Any], own: bool = True) -> None:
         if info.get("role") != "assistant":
             return
-        self.assistant_ids.add(info.get("id"))
+        (self.assistant_ids if own else self.subagent_ids).add(info.get("id"))
         tokens = info.get("tokens") or {}
         if (info.get("time") or {}).get("completed") or tokens.get("input") or tokens.get("output"):
             cache = tokens.get("cache") or {}
@@ -570,7 +601,7 @@ class CodingTurn:
                 "cost_usd": float(info["cost"]) if isinstance(info.get("cost"), (int, float)) else None,
             }
         error = info.get("error")
-        if isinstance(error, dict) and error.get("name") not in (None, "MessageAbortedError"):
+        if own and isinstance(error, dict) and error.get("name") not in (None, "MessageAbortedError"):
             self.error = (error.get("data") or {}).get("message") or error.get("name")
 
     def _total_usage(self) -> Optional[Dict[str, Any]]:
@@ -587,6 +618,12 @@ class CodingTurn:
         return total
 
     def _part(self, part: Dict[str, Any]) -> None:
+        if part.get("messageID") in self.subagent_ids:
+            # A subagent's text goes back to the assistant, not to the person;
+            # what it does shows as steps.
+            if part.get("type") == "tool":
+                self._tool(part)
+            return
         if part.get("messageID") not in self.assistant_ids:
             return
         if part.get("type") == "text":
@@ -653,6 +690,58 @@ class CodingTurn:
         })
         self.turns.publish_thread(self.state.thread_id)
         self.waiters.append(asyncio.create_task(self._answer(request_id, permission_id)))
+
+    def _question(self, request: Dict[str, Any]) -> None:
+        """OpenCode asks the person to choose: a step to answer on every device."""
+        question_id = request.get("id")
+        tool = request.get("tool") or {}
+        request_id = tool.get("callID") or question_id  # the same step as the question tool's call
+        questions = [
+            {
+                "question": str(item.get("question") or ""),
+                "header": str(item.get("header") or ""),
+                "options": [{"label": str(option.get("label") or ""), "description": str(option.get("description") or "")}
+                            for option in item.get("options") or [] if isinstance(option, dict)],
+                "multiple": bool(item.get("multiple")),
+                # OpenCode lets the person type their own answer unless it says otherwise.
+                "custom": item.get("custom") is not False,
+            }
+            for item in request.get("questions") or [] if isinstance(item, dict)
+        ]
+        summary = questions[0]["question"] if questions else "A question for you"
+        if len(questions) > 1:
+            summary = f"{summary} (and {len(questions) - 1} more)"
+        call = SimpleNamespace(name="code.question", summary=summary, arguments_for_display={"questions": questions})
+        approval_broker.open(self.state.thread_id, self.state.bot_id, call, request_id=request_id, kind="question")
+        self.question_ids[request_id] = question_id
+        self.state.approvals[request_id] = {
+            "requestId": request_id, "requestType": "question", "tool": "code.question", "summary": summary,
+            "arguments": {}, "questions": questions, "status": "pending",
+        }
+        self.turns._emit(self.state, {
+            "type": "request.opened", "requestType": "question", "requestId": request_id,
+            "tool": "code.question", "summary": summary, "arguments": {}, "questions": questions,
+        })
+        self.turns.publish_thread(self.state.thread_id)
+        self.waiters.append(asyncio.create_task(self._answer_question(request_id, question_id)))
+
+    async def _answer_question(self, request_id: str, question_id: str) -> None:
+        decision = await approval_broker.wait(request_id)
+        answers = approval_broker.take_answers(request_id) if decision == "answer" else None
+        if request_id in self.state.approvals:
+            self.state.approvals[request_id]["status"] = decision
+            if answers:
+                self.state.approvals[request_id]["answers"] = answers
+        self.turns._emit(self.state, {"type": "request.resolved", "requestId": request_id, "decision": decision,
+                                      **({"answers": answers} if answers else {})})
+        self.turns.publish_thread(self.state.thread_id)
+        try:
+            if answers:
+                await self.agent.reply_question(question_id, self.directory, answers)
+            else:
+                await self.agent.reject_question(question_id, self.directory)
+        except CodingAgentError as exc:
+            logger.warning("Couldn't pass an answer to OpenCode: %s", exc)
 
     async def _answer(self, request_id: str, permission_id: str) -> None:
         decision = await approval_broker.wait(request_id)
